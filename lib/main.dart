@@ -64,6 +64,8 @@ Future<void> main() async {
     debugPrint("QuranRadio init error: $e");
   }
 
+  await OfflineMode.load();
+
   final state = AppState();
   try {
     await state.load();

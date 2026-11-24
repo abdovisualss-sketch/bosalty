@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'login.dart';
 import 'state.dart';
 import 'ui.dart';
 
@@ -98,7 +99,11 @@ class _AppSectionState extends State<AppSection> {
     final s = AppScope.of(context);
     final p = s.pal;
     final cs = Theme.of(context).colorScheme;
-    final email = Supabase.instance.client.auth.currentUser?.email;
+    String? email;
+    try {
+      email = Supabase.instance.client.auth.currentUser?.email;
+    } catch (_) {}
+    final offline = OfflineMode.on.value && email == null;
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       if (email != null) ...[
@@ -145,6 +150,24 @@ class _AppSectionState extends State<AppSection> {
         ),
       ),
       const SizedBox(height: 22),
+      if (offline) ...[
+        Txt(s.rtl ? 'أنت تستخدم التطبيق بدون حساب. بياناتك على هذا الجهاز فقط ولا تتم مزامنتها.' : 'You are using the app without an account. Your data stays on this device and is not synced.',
+            size: 12, color: p.muted),
+        const SizedBox(height: 10),
+        SizedBox(
+          height: 50,
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed: () {
+              Navigator.of(context).popUntil((r) => r.isFirst);
+              OfflineMode.set(false);
+            },
+            icon: const Icon(Icons.login_rounded),
+            label: Text(s.rtl ? 'تسجيل الدخول للمزامنة' : 'Sign in to sync'),
+            style: FilledButton.styleFrom(backgroundColor: p.accent),
+          ),
+        ),
+      ] else
       SizedBox(
         height: 50,
         width: double.infinity,

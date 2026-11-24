@@ -1,8 +1,10 @@
+import 'dart:convert';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'backup.dart';
 import 'profile.dart';
 import 'state.dart';
 
@@ -248,31 +250,30 @@ class _PrayerBannerState extends State<PrayerBanner> {
   String _until(AppState s, int mins) {
     final h = mins ~/ 60, m = mins % 60;
     final parts = [if (h > 0) '$h${s.t('h')}', if (m > 0 || h == 0) '$m${s.t('m')}'].join(' ');
-    return s.rtl ? 'بعد $parts' : 'in $parts';
+    return s.rtl ? 'متبقي $parts' : '$parts left';
   }
 
-  Widget _cell(AppState s, String k, double time, bool isNext, bool past, int mins) {
+  Widget _chip(AppState s, String k, double time, bool isNext, bool past) {
     final p = s.pal;
-    final fg = isNext ? p.accent : (past ? p.muted.withOpacity(0.6) : p.text);
-    final sub = isNext ? p.accent : (past ? p.muted.withOpacity(0.6) : p.muted);
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 250),
-      margin: const EdgeInsets.symmetric(horizontal: 2),
-      padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 2),
+    final fg = isNext ? p.accent : (past ? p.muted : p.text);
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 2.5),
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 2),
       decoration: BoxDecoration(
-        color: isNext ? p.sel : Colors.transparent,
-        borderRadius: BorderRadius.circular(18),
+        color: isNext ? p.sel : p.card2,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: isNext ? p.accent.withOpacity(0.7) : Colors.transparent),
       ),
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Icon(_icons[k], size: 19, color: fg),
-        const SizedBox(height: 5),
-        Txt(s.t(k), size: 11, bold: true, sec: 'header', color: fg, maxLines: 1),
-        const SizedBox(height: 1),
-        FittedBox(fit: BoxFit.scaleDown, child: Txt(s.fmtClock(time), size: 11, sec: 'header', color: sub)),
-        if (isNext) ...[
-          const SizedBox(height: 3),
-          FittedBox(fit: BoxFit.scaleDown, child: Txt(_until(s, mins), size: 10, bold: true, sec: 'header', color: p.accent)),
-        ],
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            if (past) ...[Icon(Icons.check_rounded, size: 12, color: p.accent.withOpacity(0.8)), const SizedBox(width: 2)],
+            Txt(s.t(k), size: 12.5, bold: true, sec: 'header', color: fg, maxLines: 1),
+          ]),
+        ),
+        const SizedBox(height: 3),
+        FittedBox(fit: BoxFit.scaleDown, child: Txt(s.fmtClock(time), size: 12, sec: 'header', color: isNext ? p.accent : (past ? p.muted : p.text.withOpacity(0.85)))),
       ]),
     );
   }
@@ -298,22 +299,69 @@ class _PrayerBannerState extends State<PrayerBanner> {
         : prayerTimes(DateTime(now.year, now.month, now.day + 1))['fajr']! + 24;
     final int mins = ((nextH - nowH) * 60).ceil().clamp(1, 1440).toInt();
 
+    // where we are between the previous prayer and the next one (for the thin progress line)
+    final int idx = prayers.indexOf(next);
+    final double prevH = found == null
+        ? times['isha']!
+        : (idx > 0
+            ? times[prayers[idx - 1]]!
+            : prayerTimes(DateTime(now.year, now.month, now.day - 1))['isha']! - 24);
+    final double frac = nextH <= prevH ? 0.0 : ((nowH - prevH) / (nextH - prevH)).clamp(0.0, 1.0).toDouble();
+
     return Container(
       margin: const EdgeInsets.fromLTRB(14, 4, 14, 6),
-      padding: const EdgeInsets.all(5),
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
       decoration: BoxDecoration(
         color: p.card,
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: BorderRadius.circular(22),
         border: Border.all(color: p.muted.withOpacity(0.12)),
       ),
-      child: IntrinsicHeight(
-        child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          for (final k in prayers)
-            Expanded(
-              child: _cell(s, k, times[k]!, k == next, times[k]! <= nowH && k != next, mins),
-            ),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Row(children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(color: p.sel, shape: BoxShape.circle),
+            child: Icon(_icons[next], color: p.accent, size: 22),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Txt(s.rtl ? 'الصلاة القادمة' : 'Next prayer', size: 11.5, sec: 'header', color: p.muted),
+              const SizedBox(height: 2),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: AlignmentDirectional.centerStart,
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Txt(s.t(next), size: 19, bold: true, sec: 'header'),
+                  const SizedBox(width: 10),
+                  Txt(s.fmtClock(nextH), size: 15, bold: true, sec: 'header', color: p.accent),
+                ]),
+              ),
+            ]),
+          ),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            decoration: BoxDecoration(color: p.sel, borderRadius: BorderRadius.circular(20)),
+            child: Txt(_until(s, mins), size: 13, bold: true, sec: 'header', color: p.accent, maxLines: 1),
+          ),
         ]),
-      ),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          child: LinearProgressIndicator(
+            value: frac,
+            minHeight: 4,
+            borderRadius: BorderRadius.circular(2),
+            backgroundColor: p.track,
+            color: p.accent,
+          ),
+        ),
+        Row(children: [
+          for (final k in prayers)
+            Expanded(child: _chip(s, k, times[k]!, k == next, times[k]! <= nowH && k != next)),
+        ]),
+      ]),
     );
   }
 }
@@ -666,6 +714,186 @@ class _SettingsSheet extends StatelessWidget {
     );
   }
 
+  Widget _tile(AppState s, IconData icon, String title, String sub, VoidCallback onTap) => ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+        leading: _Badge(icon),
+        title: Txt(title, size: 14),
+        subtitle: Txt(sub, size: 12, color: s.pal.muted),
+        onTap: onTap,
+      );
+
+  bool _blocked(AppState s) {
+    if (s.locked) {
+      s.toast(s.t('finish_first'));
+      return true;
+    }
+    return false;
+  }
+
+  Future<bool> _askRestore(BuildContext context, AppState s, {String? what}) async {
+    final p = s.pal;
+    final r = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: p.card,
+        title: Txt(_l(s, 'استرجاع النسخة؟', 'Restore this backup?'), size: 18, bold: true, head: true, color: p.accent),
+        content: Txt(
+            _l(s, 'هيتم استبدال كل بياناتك الحالية${what == null ? '' : ' بنسخة $what'}. ولو غلطت تقدر تتراجع من "التراجع عن آخر استرجاع".',
+                'This REPLACES all your current data${what == null ? '' : ' with the copy from $what'}. If it is a mistake you can use "Undo last restore".'),
+            size: 14),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Txt(s.t('cancel'), color: p.muted)),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: p.accent),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Txt(_l(s, 'استرجاع', 'Restore'), bold: true, color: Colors.white),
+          ),
+        ],
+      ),
+    );
+    return r == true;
+  }
+
+  void _restoreResult(AppState s, bool ok) => s.toast(ok
+      ? _l(s, 'تم استرجاع النسخة الاحتياطية بنجاح', 'Backup restored successfully')
+      : _l(s, 'النسخة غير صالحة ولم يتغير شيء', 'Invalid backup. Nothing was changed'));
+
+  Future<void> _saveFile(BuildContext context, AppState s) async {
+    try {
+      final ok = await BackupFiles.save(s);
+      if (ok) s.toast(_l(s, 'تم حفظ النسخة الاحتياطية', 'Backup file saved'));
+    } catch (e) {
+      s.toast(_l(s, 'تعذر حفظ الملف. جرّب "نسخ كنص" بدلًا منه.', 'Could not save the file. Try "Copy backup as text" instead.'));
+    }
+  }
+
+  Future<void> _restoreFile(BuildContext context, AppState s) async {
+    if (_blocked(s)) return;
+    String? text;
+    try {
+      text = await BackupFiles.pickText();
+    } catch (e) {
+      s.toast(_l(s, 'تعذر فتح الملف', 'Could not open the file'));
+      return;
+    }
+    if (text == null || !context.mounted) return;
+    if (!await _askRestore(context, s)) return;
+    _restoreResult(s, s.importBackupJson(text));
+  }
+
+  Future<void> _autoCopies(BuildContext context, AppState s) async {
+    if (_blocked(s)) return;
+    final p = s.pal;
+    final list = s.autoBackups;
+    final picked = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: p.card,
+        title: Txt(_l(s, 'النسخ التلقائية', 'Automatic copies'), size: 18, bold: true, head: true, color: p.accent),
+        content: SizedBox(
+          width: 420,
+          child: list.isEmpty
+              ? Txt(_l(s, 'لا توجد نسخ بعد. هتتعمل أول نسخة تلقائيًا في أول تشغيل بعد وجود بيانات.', 'No copies yet. The first one is made automatically the next time you open the app with some data.'), size: 14, color: p.muted)
+              : ListView(shrinkWrap: true, children: [
+                  for (final e in list)
+                    Builder(builder: (_) {
+                      var info = '';
+                      try {
+                        final d = jsonDecode(e['json'] as String) as Map;
+                        info = _l(s, '${(d['tasks'] as List).length} مهمة · ${(d['sessions'] as List).length} جلسة · ${(d['goals'] as List).length} هدف',
+                            '${(d['tasks'] as List).length} tasks · ${(d['sessions'] as List).length} sessions · ${(d['goals'] as List).length} goals');
+                      } catch (_) {}
+                      return ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.history_rounded, color: p.accent),
+                        title: Txt('${e['day']}', size: 14, bold: true),
+                        subtitle: Txt(info, size: 12, color: p.muted),
+                        onTap: () => Navigator.pop(ctx, e),
+                      );
+                    }),
+                ]),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: Txt(s.t('cancel'), color: p.muted))],
+      ),
+    );
+    if (picked == null || !context.mounted) return;
+    if (!await _askRestore(context, s, what: '${picked['day']}')) return;
+    _restoreResult(s, s.importBackupJson(picked['json'] as String));
+  }
+
+  Future<void> _undoRestore(BuildContext context, AppState s) async {
+    if (_blocked(s)) return;
+    final ok = s.undoRestore();
+    s.toast(ok
+        ? _l(s, 'تم التراجع. رجعت بياناتك كما كانت', 'Undone. Your data is back as it was')
+        : _l(s, 'لا توجد نسخة للتراجع', 'Nothing to undo'));
+  }
+
+  Future<void> _exportBackup(BuildContext context, AppState s) async {
+    final text = s.exportBackupJson();
+    await Clipboard.setData(ClipboardData(text: text));
+    s.toast(_l(s, 'تم نسخ النسخة الاحتياطية. الصقها في ملاحظات أو واتساب واحتفظ بها.', 'Backup copied. Paste it into a note or chat and keep it safe.'));
+  }
+
+  Future<void> _importBackup(BuildContext context, AppState s) async {
+    if (_blocked(s)) return;
+    final p = s.pal;
+    final ctl = TextEditingController();
+    String? err;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          backgroundColor: p.card,
+          title: Txt(_l(s, 'استرجاع نسخة احتياطية', 'Restore backup'), size: 18, bold: true, head: true, color: p.accent),
+          content: SizedBox(
+            width: 460,
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Txt(_l(s, 'تحذير: هيتم استبدال كل بياناتك الحالية بالنسخة اللي هتلصقها.', 'Warning: this REPLACES all your current data with the backup you paste.'), size: 13, color: p.muted),
+              const SizedBox(height: 10),
+              TextField(
+                controller: ctl,
+                maxLines: 8,
+                minLines: 5,
+                style: TextStyle(color: p.text, fontSize: 12),
+                decoration: fieldDeco(p, _l(s, 'الصق النسخة الاحتياطية هنا', 'Paste the backup here')),
+              ),
+              const SizedBox(height: 6),
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: TextButton.icon(
+                  onPressed: () async {
+                    final d = await Clipboard.getData(Clipboard.kTextPlain);
+                    if (d?.text != null) setD(() => ctl.text = d!.text!);
+                  },
+                  icon: Icon(Icons.content_paste_rounded, size: 16, color: p.accent),
+                  label: Txt(_l(s, 'لصق من الحافظة', 'Paste from clipboard'), size: 13, bold: true, color: p.accent),
+                ),
+              ),
+              if (err != null) Txt(err!, size: 12, color: Colors.redAccent),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: Txt(s.t('cancel'), color: p.muted)),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: p.accent),
+              onPressed: () {
+                if (s.importBackupJson(ctl.text)) {
+                  Navigator.pop(ctx, true);
+                } else {
+                  setD(() => err = _l(s, 'النسخة غير صالحة. تأكد إنك نسخت النص كامل.', 'Invalid backup. Make sure you copied the whole text.'));
+                }
+              },
+              child: Txt(_l(s, 'استرجاع', 'Restore'), bold: true, color: Colors.white),
+            ),
+          ],
+        ),
+      ),
+    );
+    ctl.dispose();
+    if (ok == true) s.toast(_l(s, 'تم استرجاع النسخة الاحتياطية بنجاح', 'Backup restored successfully'));
+  }
+
   Future<void> _confirmReset(BuildContext context, AppState s) async {
     final p = s.pal;
     final ok = await showDialog<bool>(
@@ -778,6 +1006,29 @@ class _SettingsSheet extends StatelessWidget {
               subtitle: _l(s, 'أحجام الخطوط وتخطيط شاشة التركيز', 'Text sizes and focus-screen layout'),
               children: _advanced(s),
             ),
+          ]),
+
+          // ---- backup ----
+          _Group(title: _l(s, 'النسخ الاحتياطي', 'Backup'), children: [
+            _tile(s, Icons.save_alt_rounded, _l(s, 'حفظ نسخة احتياطية كملف', 'Save backup as a file'),
+                _l(s, 'ملف JSON فيه كل بياناتك، احتفظ به في مكان آمن', 'A JSON file with all your data. Keep it somewhere safe'),
+                () => _saveFile(context, s)),
+            _tile(s, Icons.copy_rounded, _l(s, 'نسخ النسخة الاحتياطية كنص', 'Copy backup as text'),
+                _l(s, 'ينسخها للحافظة لتلصقها في ملاحظات أو رسالة', 'Copies it to the clipboard to paste in a note or chat'),
+                () => _exportBackup(context, s)),
+            _tile(s, Icons.folder_open_rounded, _l(s, 'استرجاع من ملف', 'Restore from a file'),
+                _l(s, 'اختر ملف نسخة احتياطية سبق حفظه', 'Pick a backup file you saved before'),
+                () => _restoreFile(context, s)),
+            _tile(s, Icons.content_paste_rounded, _l(s, 'استرجاع من نص', 'Restore from pasted text'),
+                _l(s, 'الصق نص النسخة الاحتياطية', 'Paste the backup text'),
+                () => _importBackup(context, s)),
+            _tile(s, Icons.history_rounded, _l(s, 'النسخ التلقائية على الجهاز', 'Automatic copies on this device'),
+                _l(s, 'يحفظ التطبيق نسخة كل يوم لآخر 5 أيام', 'The app keeps one copy per day for the last 5 days'),
+                () => _autoCopies(context, s)),
+            if (s.hasUndoRestore)
+              _tile(s, Icons.undo_rounded, _l(s, 'التراجع عن آخر استرجاع', 'Undo last restore'),
+                  _l(s, 'يرجّع بياناتك كما كانت قبل الاسترجاع', 'Brings back your data as it was before the restore'),
+                  () => _undoRestore(context, s)),
           ]),
 
           // ---- account (collapsed) ----

@@ -1,11 +1,34 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'state.dart';
 
-/// Shows the login screen until there is a valid session, then shows [child].
+/// "Use the app without an account": everything stays on this device, nothing is synced.
+/// Lets you keep working even if the cloud service is unavailable.
+class OfflineMode {
+  static final ValueNotifier<bool> on = ValueNotifier<bool>(false);
+  static const _key = 'bosalty_offline';
+
+  static Future<void> load() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      on.value = p.getBool(_key) ?? false;
+    } catch (_) {}
+  }
+
+  static Future<void> set(bool v) async {
+    on.value = v;
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setBool(_key, v);
+    } catch (_) {}
+  }
+}
+
+/// Shows the login screen until there is a valid session (or offline mode is on), then shows [child].
 /// The session is stored on the device, so you only sign in once.
 class AuthGate extends StatelessWidget {
   final Widget child;
@@ -13,16 +36,31 @@ class AuthGate extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final auth = Supabase.instance.client.auth;
-    return StreamBuilder<AuthState>(
-      stream: auth.onAuthStateChange,
-      builder: (context, snap) {
-        final session = snap.data?.session ?? auth.currentSession;
-        return AnimatedSwitcher(
-          duration: const Duration(milliseconds: 250),
-          child: session == null
-              ? const LoginScreen(key: ValueKey('login'))
-              : KeyedSubtree(key: const ValueKey('app'), child: child),
+    GoTrueClient? auth;
+    try {
+      auth = Supabase.instance.client.auth;
+    } catch (_) {}
+    return ValueListenableBuilder<bool>(
+      valueListenable: OfflineMode.on,
+      builder: (context, offline, _) {
+        Widget gate(Session? session) {
+          // signed in for real: leave offline mode so a later sign-out goes back to the login screen
+          if (session != null && offline) {
+            WidgetsBinding.instance.addPostFrameCallback((_) => OfflineMode.set(false));
+          }
+          return AnimatedSwitcher(
+            duration: const Duration(milliseconds: 250),
+            child: (session != null || offline)
+                ? KeyedSubtree(key: const ValueKey('app'), child: child)
+                : const LoginScreen(key: ValueKey('login')),
+          );
+        }
+
+        if (auth == null) return gate(null);
+        final a = auth;
+        return StreamBuilder<AuthState>(
+          stream: a.onAuthStateChange,
+          builder: (context, snap) => gate(snap.data?.session ?? a.currentSession),
         );
       },
     );
@@ -433,6 +471,12 @@ class _LoginScreenState extends State<LoginScreen> {
                                     : "Don't have an account? Sign up",
                                 style: TextStyle(color: p.accent, fontWeight: FontWeight.w600),
                               ),
+                            ),
+                            TextButton.icon(
+                              onPressed: _loading ? null : () => OfflineMode.set(true),
+                              icon: Icon(Icons.cloud_off_rounded, size: 18, color: p.muted),
+                              label: Text('Continue without an account (data stays on this device)',
+                                  textAlign: TextAlign.center, style: TextStyle(color: p.muted, fontSize: 12)),
                             ),
                           ],
                         ),

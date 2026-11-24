@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-
+import 'dart:convert';
 import 'notify.dart';
 import 'strings.dart';
 
@@ -149,10 +149,14 @@ String newId() {
   return List.generate(8, (_) => hex[r.nextInt(16)]).join();
 }
 
+
+
 // ---------------- app state ----------------
 class AppState extends ChangeNotifier with WidgetsBindingObserver {
   Map<String, dynamic> data = defaultData();
   SharedPreferences? _prefs;
+
+
 
   // ui state
   int tab = 0;
@@ -189,6 +193,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     final p = presets;
     total = (p.length > 1 ? p[1] : p[0]) * 60;
     remaining = total;
+    _autoSnapshot();
 
     // cloud sync: same `app_data` row the desktop app uses
     WidgetsBinding.instance.addObserver(this);
@@ -219,6 +224,88 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     for (final x in (base['sessions'] as List)) {
       x['project'] = renames[x['project']] ?? x['project'];
     }
+  }
+
+  // ---------------- backup export / import ----------------
+  /// Everything in the app (tasks, goals, sessions, XP, badges, settings, profile) as one JSON text.
+  String exportBackupJson() {
+    final backup = {
+      'app': 'bosalty',
+      'version': 1,
+      'exported_at': DateTime.now().toIso8601String(),
+      'data': data,
+    };
+    return const JsonEncoder.withIndent('  ').convert(backup);
+  }
+
+  static const _safetyKey = 'bosalty_before_restore';
+  static const _autoKey = 'bosalty_auto_backups';
+
+  /// Replaces ALL current data with the backup. Returns false (and changes nothing) if the text is not a valid backup.
+  /// The data you had right before is kept aside, so a wrong restore can be undone ([undoRestore]).
+  bool importBackupJson(String jsonStr, {bool keepSafety = true}) {
+    try {
+      final decoded = jsonDecode(jsonStr.trim());
+      if (decoded is! Map) return false;
+      final raw = Map<String, dynamic>.from(decoded);
+      final imported = (raw['data'] is Map) ? Map<String, dynamic>.from(raw['data'] as Map) : raw;
+      // basic sanity check: must look like Bosalty data
+      if (imported['tasks'] is! List && imported['sessions'] is! List && imported['goals'] is! List) return false;
+
+      final base = defaultData();
+      base.addAll(imported);
+      for (final k in ['tasks', 'goals', 'sessions', 'days', 'badges']) {
+        if (base[k] is! List) base[k] = [];
+      }
+      _normalize(base);
+
+      if (keepSafety) _prefs?.setString(_safetyKey, jsonEncode(data));
+      data = base;
+      selectedId = null;
+      allDays = settings['default_all_days'] == true;
+      save(); // stamps it as newest, so it also replaces the cloud copy
+      notifyListeners();
+      return true;
+    } catch (e) {
+      debugPrint('Backup import error: $e');
+      return false;
+    }
+  }
+
+  /// true while there is a "before the last restore" copy that can be brought back.
+  bool get hasUndoRestore => _prefs?.getString(_safetyKey) != null;
+
+  bool undoRestore() {
+    final raw = _prefs?.getString(_safetyKey);
+    if (raw == null) return false;
+    final ok = importBackupJson(raw, keepSafety: false);
+    if (ok) _prefs?.remove(_safetyKey);
+    return ok;
+  }
+
+  // ---- automatic daily copies kept on the device (last 5 days) ----
+  List<Map<String, dynamic>> get autoBackups {
+    try {
+      final raw = _prefs?.getString(_autoKey);
+      if (raw == null) return [];
+      return (jsonDecode(raw) as List).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  void _autoSnapshot() {
+    try {
+      final today = iso(DateTime.now());
+      final list = autoBackups;
+      if (list.isNotEmpty && list.first['day'] == today) return;
+      if (tasks.isEmpty && sessions.isEmpty && goals.isEmpty) return;
+      list.insert(0, {'day': today, 'json': jsonEncode(data)});
+      while (list.length > 5) {
+        list.removeLast();
+      }
+      _prefs?.setString(_autoKey, jsonEncode(list));
+    } catch (_) {}
   }
 
   void save() {
@@ -261,8 +348,16 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   DateTime _stampOf(Map m) =>
       DateTime.tryParse('${m['_updated'] ?? ''}') ?? DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
 
+  User? get _user {
+    try {
+      return Supabase.instance.client.auth.currentUser;
+    } catch (_) {
+      return null;
+    }
+  }
+
   void _schedulePush() {
-    if (Supabase.instance.client.auth.currentUser == null) return;
+    if (_user == null) return;
     _pushPending = true;
     _pushTimer?.cancel();
     _pushTimer = Timer(const Duration(milliseconds: 800), pushNow);
@@ -270,6 +365,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> pushNow() async {
     _pushTimer?.cancel();
+    if (_user == null) return;
     final c = Supabase.instance.client;
     final uid = c.auth.currentUser?.id;
     if (uid == null || !_pushPending) return;
@@ -324,6 +420,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> pullRemote() async {
+    if (_user == null) return;
     final c = Supabase.instance.client;
     final uid = c.auth.currentUser?.id;
     if (uid == null || running) return;

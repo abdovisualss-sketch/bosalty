@@ -19,13 +19,17 @@ dependencies:
   just_audio: any
   just_audio_background: any
   just_audio_windows: any
+  file_picker: ^13.4.1
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_launcher_icons: ^0.13.1
 
-# قسم إعدادات الأيقونة يوضع في نهاية الملف على محاذاة البداية
+# لحل تعارض win32 بين الحزم
+dependency_overrides:
+  win32: ^6.3.0
+
 flutter_launcher_icons:
   android: "ic_launcher"
   ios: true
@@ -38,6 +42,7 @@ flutter:
     - assets/icons/
     - assets/brand/
     - assets/quran/
+
   fonts:
     - family: Thmanyah
       fonts:
