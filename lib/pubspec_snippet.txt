@@ -1,0 +1,14 @@
+# ضيف الأسطر دي في pubspec.yaml (احترس من المسافات: الـ indentation مهم)
+
+flutter:
+  assets:
+    # ... اللي عندك زي ما هو (assets/brand/ و assets/icons/ ... إلخ)
+    - assets/quran/
+
+  fonts:
+    # ... خط IBMPlexSansArabic وغيره زي ما هم
+    - family: AmiriQuran
+      fonts:
+        - asset: assets/fonts/AmiriQuran-Regular.ttf
+
+# المكتبات المطلوبة (موجودة عندك أصلاً): shared_preferences, supabase_flutter

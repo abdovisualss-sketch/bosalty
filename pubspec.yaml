@@ -1,0 +1,48 @@
+name: bosalty
+description: Bosalty (My Compass) - tasks, focus timer, session history, monthly goals.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  flutter_secure_storage: ^11.2.0
+  shared_preferences: ^2.2.2
+  supabase_flutter: ^2.0.0
+  timezone: ^0.10.0
+  flutter_local_notifications: ^19.4.0
+  just_audio: any
+  just_audio_background: any
+  just_audio_windows: any
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_launcher_icons: ^0.13.1
+
+# قسم إعدادات الأيقونة يوضع في نهاية الملف على محاذاة البداية
+flutter_launcher_icons:
+  android: "ic_launcher"
+  ios: true
+  image_path: "assets/icons/Bosalty_icon.ico"
+  min_sdk_android: 21
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icons/
+    - assets/brand/
+    - assets/quran/
+  fonts:
+    - family: Thmanyah
+      fonts:
+        - asset: assets/fonts/thmanyahserifdisplay-Bold.otf
+          weight: 700
+    - family: AmiriQuran
+      fonts:
+        - asset: assets/fonts/AmiriQuran-Regular.ttf
