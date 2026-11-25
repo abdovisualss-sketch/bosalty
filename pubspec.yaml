@@ -32,8 +32,10 @@ dependency_overrides:
 
 flutter_launcher_icons:
   android: "ic_launcher"
-  ios: true
-  image_path: "assets/icons/Bosalty_icon.ico"
+  ios: false
+  image_path: "assets/icons/app_icon.png"
+  adaptive_icon_background: "#D32F2F"   # نفس أحمر الأيقونة
+  adaptive_icon_foreground: "assets/icons/app_icon_foreground.png"
   min_sdk_android: 21
 
 flutter:

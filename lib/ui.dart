@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'backup.dart';
+import 'onboarding.dart';
 import 'profile.dart';
 import 'state.dart';
 
@@ -190,7 +191,7 @@ InputDecoration fieldDeco(Pal p, String hint) => InputDecoration(
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
     );
 
-// ---------- header: logo + open-tasks chip; everything else lives in Settings ----------
+// ---------- header: logo + open-tasks chip + tour + settings ----------
 class Header extends StatelessWidget {
   const Header({super.key});
   @override
@@ -210,9 +211,15 @@ class Header extends StatelessWidget {
           ),
         ),
         IconButton(
-            onPressed: () => showSettings(context),
-            tooltip: s.t('settings'),
-            icon: Icon(Icons.tune, color: p.muted)),
+          onPressed: () => Onboarding.show(context),
+          tooltip: s.rtl ? 'جولة في التطبيق' : 'App tour',
+          icon: Icon(Icons.tour_rounded, color: p.muted),
+        ),
+        IconButton(
+          onPressed: () => showSettings(context),
+          tooltip: s.t('settings'),
+          icon: Icon(Icons.tune, color: p.muted),
+        ),
       ]),
     );
   }
@@ -785,7 +792,7 @@ class _SettingsSheet extends StatelessWidget {
     if (_blocked(s)) return;
     final p = s.pal;
     final list = s.autoBackups;
-    final picked = await showDialog<Map<String, dynamic>>(
+    final picked = await showDialog<Map>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: p.card,

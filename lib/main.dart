@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-
+import 'onboarding.dart';
 import 'adhkar.dart';
 import 'focus.dart';
 import 'history_goals.dart';
@@ -155,11 +155,17 @@ class _ShellState extends State<Shell> {
   Timer? _clock;
   String _alerted = '';
 
-  @override
+@override
   void initState() {
     super.initState();
     _clock = Timer.periodic(const Duration(seconds: 20), (_) => _tickPrayer());
-    WidgetsBinding.instance.addPostFrameCallback((_) => _tickPrayer());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _tickPrayer();
+      if (mounted) {
+        final s = AppScope.of(context);
+        Onboarding.maybeShow(context, s);
+      }
+    });
   }
 
   /// Keeps the phone's prayer notifications scheduled and, where the system can't notify us
@@ -318,3 +324,4 @@ class _ShellState extends State<Shell> {
     );
   }
 }
+

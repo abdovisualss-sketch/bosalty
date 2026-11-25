@@ -104,13 +104,17 @@ class FocusScreen extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
       children: [
-        const TimerCard(),
+        // 1. شريط اليوم (أول شيء)
+        const DayBar(),
+        const SizedBox(height: 8),
+        // 2. تصفية المشاريع (الكاتوجري)
+        const ProjectFilter(),
         const SizedBox(height: 14),
+        // 3. إضافة مهمة جديدة
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Txt(s.t('tasks'), size: 18, bold: true, head: true, sec: 'tasks'),
-            // أيقونة مجمع الأفكار في الأعلى
             IconButton(
               onPressed: () => _showIdeasCollector(context, s),
               tooltip: 'مجمع الأفكار',
@@ -120,11 +124,11 @@ class FocusScreen extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         const AddTaskCard(),
-        const SizedBox(height: 10),
-        const DayBar(),
-        const SizedBox(height: 8),
-        const ProjectFilter(),
-        const SizedBox(height: 8),
+        const SizedBox(height: 14),
+        // 4. مؤقت التركيز
+        const TimerCard(),
+        const SizedBox(height: 14),
+        // 5. قائمة المهام
         if (list.isEmpty)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 40),
@@ -277,7 +281,7 @@ class AddTaskCard extends StatefulWidget {
 class _AddTaskCardState extends State<AddTaskCard> {
   final ctl = TextEditingController();
   String project = projects[0];
-  String urgency = 'متوسط'; // الخيار الافتراضي للاستعجال
+  String urgency = 'متوسط';
   String? goalId;
 
   @override
@@ -290,7 +294,6 @@ class _AddTaskCardState extends State<AddTaskCard> {
     if (ctl.text.trim().isEmpty) return;
     final xp = urgency == 'مستعجل' ? 30 : (urgency == 'متوسط' ? 20 : (urgency == 'سهل' ? 10 : 5));
     if (s.addTask(ctl.text, project, xp, s.day, goalId)) {
-      // حفظ مستوى الاستعجال داخل المهمة
       s.tasks.last['urgency'] = urgency;
       ctl.clear();
     }
@@ -319,7 +322,6 @@ class _AddTaskCardState extends State<AddTaskCard> {
             ]),
           ),
           const SizedBox(width: 8),
-          // منسدلة اختيار مستوى الاستعجال
           Expanded(
             child: dd<String>(p, value: urgency, onChanged: (v) => setState(() => urgency = v!), items: [
               for (final u in urgencyLevels)
@@ -500,7 +502,6 @@ class TaskCard extends StatelessWidget {
             const SizedBox(height: 6),
             Wrap(spacing: 8, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
               ProjectPill(project, sec: 'tasks'),
-              // شارة مستوى الاستعجال
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
@@ -562,7 +563,6 @@ void editTaskDialog(BuildContext context, String id) {
                   DropdownMenuItem(value: k, child: Txt(s.pdisp(k), size: 13, bold: true, color: p.proj(k))),
               ]),
               const SizedBox(height: 10),
-              // تعديل مستوى الاستعجال
               dd<String>(p, value: urgency, onChanged: (v) => setSt(() => urgency = v!), items: [
                 for (final u in urgencyLevels)
                   DropdownMenuItem(value: u, child: Txt(u, size: 13, bold: true, color: getUrgencyColor(u))),
