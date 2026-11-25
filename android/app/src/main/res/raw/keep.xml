@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- keeps the notification tones when the release build shrinks resources -->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@raw/timer_*" />

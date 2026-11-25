@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:convert';
 import 'notify.dart';
+import 'sounds.dart';
 import 'strings.dart';
 
 // ---------------- constants ----------------
@@ -37,15 +39,21 @@ const goalTint = {
   'Learning': [Color(0xFFF0FDFA), Color(0xFF163330)],
   'Freelance': [Color(0xFFFFFBEB), Color(0xFF38311E)],
 };
+// colours for projects the user creates: (light, dark)
+const customPalette = [
+  [Color(0xFFDB2777), Color(0xFFF472B6)],
+  [Color(0xFF0891B2), Color(0xFF22D3EE)],
+  [Color(0xFF65A30D), Color(0xFFA3E635)],
+  [Color(0xFF7C3AED), Color(0xFFA78BFA)],
+  [Color(0xFFDC2626), Color(0xFFF87171)],
+  [Color(0xFF4F46E5), Color(0xFF818CF8)],
+  [Color(0xFF0D9488), Color(0xFF5EEAD4)],
+  [Color(0xFFCA8A04), Color(0xFFFDE047)],
+];
 const renames = {'umaime': 'Umami', 'مشروع التخرج': 'Graduation Project', 'Religion': 'Freelance'};
-const xpPerLevel = 100;
 /// Red used for errors, delete buttons and urgent tasks.
 const kUrgent = Color(0xFFE11D48);
 const prayers = ['fajr', 'dhuhr', 'asr', 'maghrib', 'isha'];
-const badgeKeys = [
-  'first_task', 'five_tasks', 'ten_tasks', 'first_pomo', 'ten_pomo',
-  'streak_3', 'streak_7', 'first_goal',
-];
 const sections = ['global', 'header', 'tasks', 'timer', 'history', 'goals'];
 
 // accent: [accent light, accent dark, selected light, selected dark]
@@ -62,7 +70,8 @@ const accents = {
 class Pal {
   final bool dark;
   final Color accent, sel;
-  Pal(this.dark, String accentKey)
+  final Map<String, int> custom; // colour index of the projects the user created
+  Pal(this.dark, String accentKey, [this.custom = const {}])
       : accent = accents[accentKey]![dark ? 1 : 0],
         sel = accents[accentKey]![dark ? 3 : 2];
   Color get bg => dark ? const Color(0xFF121112) : const Color(0xFFF9F9FB);
@@ -73,8 +82,20 @@ class Pal {
   Color get muted => dark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
   Color get track => dark ? const Color(0xFF262325) : const Color(0xFFE2E8F0);
   Color get onProj => dark ? const Color(0xFF141213) : Colors.white;
-  Color proj(String p) => projectColors[p]?[dark ? 1 : 0] ?? accent;
-  Color tint(String p) => goalTint[p]?[dark ? 1 : 0] ?? card2;
+  Color proj(String p) {
+    final c = projectColors[p];
+    if (c != null) return c[dark ? 1 : 0];
+    final i = custom[p];
+    if (i != null) return customPalette[i % customPalette.length][dark ? 1 : 0];
+    return accent;
+  }
+
+  Color tint(String p) {
+    final t = goalTint[p];
+    if (t != null) return t[dark ? 1 : 0];
+    if (custom.containsKey(p)) return Color.alphaBlend(proj(p).withOpacity(0.12), card2);
+    return card2;
+  }
 }
 
 // ---------------- date helpers ----------------
@@ -131,15 +152,15 @@ Map<String, dynamic> defaultSettings() => {
       'font_timer': 1.0, 'font_history': 1.0, 'font_goals': 1.0,
       'compact_tasks': false, 'show_tiles': true, 'default_all_days': false,
       'presets': [15, 25, 45, 60],
-      'xp_easy': 10, 'xp_medium': 20, 'xp_hard': 30, 'goal_xp': 50,
-      'show_badges': true, 'show_prayers': true, 'sound': true, 'notify': true,
+      'show_prayers': true, 'sound': true, 'notify': true,
       'prayer_alerts': true,
+      'timer_sound': 'chime',
       'mushaf_font': 28.0,
     };
 
 Map<String, dynamic> defaultData() => {
-      'tasks': [], 'xp': 0, 'done_count': 0, 'pomodoros': 0, 'days': [],
-      'badges': [], 'sessions': [], 'goals': [], 'goals_done': 0,
+      'tasks': [], 'sessions': [], 'goals': [],
+      'project_meta': {},
       'settings': defaultSettings(),
     };
 
@@ -182,6 +203,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> load() async {
     _prefs = await SharedPreferences.getInstance();
+    await TimerSounds.loadCustom(); // the user's own tone file (this device only)
     final base = defaultData();
     try {
       final raw = _prefs!.getString('bosalty_data');
@@ -189,6 +211,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     } catch (_) {}
     _normalize(base);
     data = base;
+    _fixProjectRefs();
     allDays = settings['default_all_days'] == true;
     final p = presets;
     total = (p.length > 1 ? p[1] : p[0]) * 60;
@@ -227,7 +250,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   // ---------------- backup export / import ----------------
-  /// Everything in the app (tasks, goals, sessions, XP, badges, settings, profile) as one JSON text.
+  /// Everything in the app (tasks, goals, sessions, settings, profile) as one JSON text.
   String exportBackupJson() {
     final backup = {
       'app': 'bosalty',
@@ -254,7 +277,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
       final base = defaultData();
       base.addAll(imported);
-      for (final k in ['tasks', 'goals', 'sessions', 'days', 'badges']) {
+      for (final k in ['tasks', 'goals', 'sessions']) {
         if (base[k] is! List) base[k] = [];
       }
       _normalize(base);
@@ -262,6 +285,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       if (keepSafety) _prefs?.setString(_safetyKey, jsonEncode(data));
       data = base;
       selectedId = null;
+      _fixProjectRefs();
       allDays = settings['default_all_days'] == true;
       save(); // stamps it as newest, so it also replaces the cloud copy
       notifyListeners();
@@ -458,6 +482,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         data = base;
         _prefs?.setString('bosalty_data', jsonEncode(data));
         if (selectedId != null && findTask(selectedId!) == null) selectedId = null;
+        _fixProjectRefs();
         notifyListeners();
         toast('Loaded ${tasks.length} tasks from the cloud');
       } else if (l.isAfter(r)) {
@@ -503,7 +528,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   String get lang => settings['lang'] as String;
   bool get rtl => lang == 'ar';
   bool get dark => settings['theme'] == 'dark';
-  Pal get pal => Pal(dark, settings['accent'] as String);
+  Pal get pal => Pal(dark, settings['accent'] as String, _customColors());
   Locale get locale => Locale(lang);
   List<int> get presets {
     final l = ((settings['presets'] ?? [15, 25, 45, 60]) as List).map((e) => (e as num).toInt()).toList();
@@ -521,9 +546,187 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     return s;
   }
 
+  // ---------------- projects: the list + customization (name / line under it / picture) ----------------
+  // Every project has an internal key. The built-in ones ('Dlight', 'Umami', ...) keep their keys, new ones
+  // get 'c_xxxxxxxx'. Tasks, goals and sessions store that key, so renaming or deleting never breaks old data.
+  // The list and the customization live inside `data`: they sync with the cloud and are part of backups.
+
+  /// The projects the user has now, in order.
+  List<String> get projectKeys {
+    final l = data['project_list'];
+    if (l is List) {
+      final k = <String>[for (final e in l) if (e is String) e];
+      if (k.isNotEmpty) return k;
+    }
+    return List<String>.of(projects);
+  }
+
+  /// [projectKeys] plus [extra] when it is not in the list (a deleted project that an old task still points to),
+  /// so a drop-down never gets a value it has no item for.
+  List<String> projectKeysWith(String? extra) {
+    final k = projectKeys;
+    if (extra != null && extra != 'All' && !k.contains(extra)) k.add(extra);
+    return k;
+  }
+
+  bool isCustomProject(String k) => !projects.contains(k);
+
+  /// Colour index of every project the user created (used by [Pal]).
+  Map<String, int> _customColors() {
+    final out = <String, int>{};
+    final all = data['project_meta'];
+    if (all is Map) {
+      all.forEach((k, v) {
+        if (v is Map && v['ci'] is num) out['$k'] = (v['ci'] as num).toInt();
+      });
+    }
+    return out;
+  }
+
+  /// What the user customized for [k]: {name, sub, image(base64 png), noimg, ci}. Empty if nothing.
+  Map<String, dynamic> projectMeta(String k) {
+    final all = data['project_meta'];
+    if (all is Map && all[k] is Map) return Map<String, dynamic>.from(all[k] as Map);
+    return <String, dynamic>{};
+  }
+
+  /// The built-in name (before any customization).
+  String defaultProjectName(String k) => lang == 'ar' ? (projectAr[k] ?? k) : (projectEn[k] ?? k);
+
+  /// The name shown everywhere (tiles, task picker, timer, history, goals, report).
   String pdisp(String k) {
     if (k == 'All') return t('all');
-    return lang == 'ar' ? (projectAr[k] ?? k) : (projectEn[k] ?? k);
+    final v = projectMeta(k)['name'];
+    final custom = v is String ? v.trim() : '';
+    return custom.isNotEmpty ? custom : defaultProjectName(k);
+  }
+
+  /// The small line under the name (e.g. "شركة ديلايت"). Empty if none.
+  String psub(String k) {
+    final v = projectMeta(k)['sub'];
+    return v is String ? v.trim() : '';
+  }
+
+  final Map<String, String> _imgSrc = {};
+  final Map<String, Uint8List> _imgBytes = {};
+
+  /// The picture the user chose for [k] (null = none). Decoded once and cached.
+  Uint8List? pimage(String k) {
+    final v = projectMeta(k)['image'];
+    final b64 = v is String ? v : '';
+    if (b64.isEmpty) {
+      _imgSrc.remove(k);
+      _imgBytes.remove(k);
+      return null;
+    }
+    if (_imgSrc[k] != b64) {
+      try {
+        _imgBytes[k] = base64Decode(b64);
+        _imgSrc[k] = b64;
+      } catch (_) {
+        return null;
+      }
+    }
+    return _imgBytes[k];
+  }
+
+  /// The user removed the built-in picture of [k] (so its name is written as text).
+  bool pNoImage(String k) => projectMeta(k)['noimg'] == true;
+
+  /// [k] has a built-in picture and the user did not remove it.
+  bool pHasBuiltin(String k) => projectTile.containsKey(k) && !pNoImage(k);
+
+  /// Does [k] have any picture / icon? If not, its name is written as text instead.
+  bool pHasIcon(String k) => pimage(k) != null || pHasBuiltin(k);
+
+  /// Saves the customization of one project. Empty values mean "default".
+  void setProjectMeta(String k, {String name = '', String sub = '', String image = '', bool noImage = false}) {
+    final all = data['project_meta'] is Map
+        ? Map<String, dynamic>.from(data['project_meta'] as Map)
+        : <String, dynamic>{};
+    final old = projectMeta(k);
+    final m = <String, dynamic>{};
+    if (old['ci'] is num) m['ci'] = old['ci']; // colour of a project the user created
+    if (name.trim().isNotEmpty) m['name'] = name.trim();
+    if (sub.trim().isNotEmpty) m['sub'] = sub.trim();
+    if (image.isNotEmpty) m['image'] = image;
+    if (noImage && image.isEmpty) m['noimg'] = true;
+    if (m.isEmpty) {
+      all.remove(k);
+    } else {
+      all[k] = m;
+    }
+    data['project_meta'] = all;
+    _commit();
+  }
+
+  /// Back to the built-in name / line / picture (built-in projects only).
+  void resetProjectMeta(String k) => setProjectMeta(k);
+
+  /// Adds a new project and returns its key.
+  String addProject({required String name, String sub = '', String image = ''}) {
+    final id = 'c_${newId()}';
+    final keys = projectKeys..add(id);
+    data['project_list'] = keys;
+    final all = data['project_meta'] is Map
+        ? Map<String, dynamic>.from(data['project_meta'] as Map)
+        : <String, dynamic>{};
+    final used = all.values.where((v) => v is Map && v['ci'] is num).length;
+    final m = <String, dynamic>{'ci': used, 'name': name.trim()};
+    if (sub.trim().isNotEmpty) m['sub'] = sub.trim();
+    if (image.isNotEmpty) m['image'] = image;
+    all[id] = m;
+    data['project_meta'] = all;
+    _commit();
+    return id;
+  }
+
+  /// Removes a project from the lists. Tasks, goals and sessions that used it are kept (and still show its
+  /// name), so nothing is lost. Returns false if it cannot be removed right now.
+  bool deleteProject(String k) {
+    final keys = projectKeys;
+    if (!keys.contains(k)) return false;
+    if (keys.length <= 1) {
+      toast(rtl ? 'لازم يفضل تصنيف واحد على الأقل' : 'At least one project must stay');
+      return false;
+    }
+    if (ctx != null) {
+      toast(t('finish_first'));
+      return false;
+    }
+    keys.remove(k);
+    data['project_list'] = keys;
+    if (filter == k) filter = 'All';
+    if (histFilter == k) histFilter = 'All';
+    if (timerProject == k) timerProject = keys.first;
+    final sel = findTask(selectedId);
+    if (sel != null && sel['project'] == k) selectedId = null;
+    _commit();
+    return true;
+  }
+
+  /// true if some built-in project was deleted.
+  bool get hasRemovedDefaults {
+    final k = projectKeys;
+    return projects.any((e) => !k.contains(e));
+  }
+
+  /// Brings back the built-in projects that were deleted.
+  void restoreProjects() {
+    final keys = projectKeys;
+    for (final e in projects) {
+      if (!keys.contains(e)) keys.add(e);
+    }
+    data['project_list'] = keys;
+    _commit();
+  }
+
+  /// After the data was replaced (start-up, cloud, restore): no filter / timer may point to a missing project.
+  void _fixProjectRefs() {
+    final k = projectKeys;
+    if (filter != 'All' && !k.contains(filter)) filter = 'All';
+    if (histFilter != 'All' && !k.contains(histFilter)) histFilter = 'All';
+    if (ctx == null && selectedId == null && !k.contains(timerProject)) timerProject = k.first;
   }
 
   String fmtMin(num m) {
@@ -545,50 +748,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     var mo = kMonths[lang]![d.month - 1];
     if (lang == 'en') mo = mo.substring(0, 3);
     return '$wd, ${d.day} $mo ${d.year}';
-  }
-
-  String streakText(int n) {
-    if (rtl) {
-      final w = n == 1 ? 'يوم' : n == 2 ? 'يومان' : n <= 10 ? 'أيام' : 'يومًا';
-      return t('streak', {'n': n == 2 ? '' : n, 'd': w}).replaceAll('  ', ' ');
-    }
-    return t('streak', {'n': n, 'd': n == 1 ? 'day' : 'days'});
-  }
-
-  List<MapEntry<String, int>> get diffs => [
-        MapEntry('easy', (settings['xp_easy'] as num).toInt()),
-        MapEntry('medium', (settings['xp_medium'] as num).toInt()),
-        MapEntry('hard', (settings['xp_hard'] as num).toInt()),
-      ];
-
-  int get level => (data['xp'] as int) ~/ xpPerLevel + 1;
-  String get levelTitle => t('lv${math.min(level - 1, 4)}');
-
-  int get streakCount {
-    final days = (data['days'] as List).cast<String>().toSet();
-    var d = dateOnly(DateTime.now());
-    if (!days.contains(iso(d))) d = d.subtract(const Duration(days: 1));
-    var c = 0;
-    while (days.contains(iso(d))) {
-      c++;
-      d = d.subtract(const Duration(days: 1));
-    }
-    return c;
-  }
-
-  bool _badge(String k) {
-    final d = data;
-    switch (k) {
-      case 'first_task': return d['done_count'] >= 1;
-      case 'five_tasks': return d['done_count'] >= 5;
-      case 'ten_tasks': return d['done_count'] >= 10;
-      case 'first_pomo': return d['pomodoros'] >= 1;
-      case 'ten_pomo': return d['pomodoros'] >= 10;
-      case 'streak_3': return streakCount >= 3;
-      case 'streak_7': return streakCount >= 7;
-      case 'first_goal': return d['goals_done'] >= 1;
-    }
-    return false;
   }
 
   List<Map<String, dynamic>> get pendingTasks => tasks.where((x) => x['done'] != true).toList();
@@ -632,6 +791,18 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     return true;
   }
 
+  /// The chosen end-of-session tone (falls back to the default if the saved id is unknown).
+  String get timerSoundId {
+    final id = settings['timer_sound'];
+    return (id is String && TimerSounds.byId(id) != null) ? id : TimerSounds.defaultId;
+  }
+
+  void setTimerSound(String id) {
+    if (TimerSounds.byId(id) == null) return;
+    setSetting('timer_sound', id);
+    if (running) _scheduleTimerAlert(); // changed while a session is running: re-arm with the new tone
+  }
+
   void toggleTheme() => setSetting('theme', dark ? 'light' : 'dark');
   void toggleLang() => setSetting('lang', rtl ? 'en' : 'ar', needsUnlocked: true);
 
@@ -660,33 +831,13 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
-  // --- XP ---
-  void award(int xp, String why) {
-    final oldLevel = level;
-    data['xp'] = (data['xp'] as int) + xp;
-    final today = iso(DateTime.now());
-    final days = data['days'] as List;
-    if (!days.contains(today)) days.add(today);
-    final notes = <String>[t('toast', {'n': xp, 'why': why})];
-    if (level > oldLevel) notes.add(t('levelup', {'n': level}));
-    for (final k in badgeKeys) {
-      final badges = data['badges'] as List;
-      if (!badges.contains(k) && _badge(k)) {
-        badges.add(k);
-        notes.add(t('newbadge', {'name': t('b_$k')}));
-      }
-    }
-    save();
-    toast(notes.join('   •   '));
-  }
-
   // --- tasks ---
-  bool addTask(String title, String project, int xp, DateTime d, String? goalId) {
+  bool addTask(String title, String project, DateTime d, String? goalId) {
     title = title.trim();
     if (title.isEmpty) return false;
     tasks.add({
       'id': newId(), 'title': title, 'date': iso(d), 'goal': goalId,
-      'project': project, 'xp': xp, 'done': false,
+      'project': project, 'done': false,
     });
     allDays = false;
     day = d;
@@ -694,12 +845,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     return true;
   }
 
-  void updateTask(String id, {String? title, String? project, int? xp, DateTime? d, String? goalId, bool clearGoal = false}) {
+  void updateTask(String id, {String? title, String? project, DateTime? d, String? goalId, bool clearGoal = false}) {
     final x = findTask(id);
     if (x == null) return;
     if (title != null && title.trim().isNotEmpty) x['title'] = title.trim();
     if (project != null) x['project'] = project;
-    if (xp != null) x['xp'] = xp;
     if (d != null) x['date'] = iso(d);
     if (clearGoal) x['goal'] = null;
     if (goalId != null) x['goal'] = goalId;
@@ -728,7 +878,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     if (x == null) return;
     if (x['done'] == true) {
       x['done'] = false;
-      if ((data['done_count'] as int) > 0) data['done_count'] = (data['done_count'] as int) - 1;
       if (x['goal'] != null) {
         bumpGoal(x['goal'] as String, -1);
       } else {
@@ -736,9 +885,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       }
     } else {
       x['done'] = true;
-      data['done_count'] = (data['done_count'] as int) + 1;
-      award(x['xp'] as int, t('why_task', {'t': x['title']}));
-      if (x['goal'] != null) bumpGoal(x['goal'] as String, 1);
+      if (x['goal'] != null) {
+        bumpGoal(x['goal'] as String, 1);
+      } else {
+        _commit();
+      }
     }
   }
 
@@ -809,7 +960,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     }
     goals.add({
       'id': newId(), 'month': monthKey, 'title': title, 'category': category,
-      'target': n.clamp(1, 999), 'progress': 0, 'rewarded': false,
+      'target': n.clamp(1, 999), 'progress': 0,
     });
     _commit();
     return true;
@@ -822,17 +973,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     }
     if (g == null) return;
     g['progress'] = ((g['progress'] as int) + delta).clamp(0, g['target'] as int);
-    if ((g['progress'] as int) >= (g['target'] as int) && g['rewarded'] != true) {
-      g['rewarded'] = true;
-      data['goals_done'] = (data['goals_done'] as int) + 1;
-      award((settings['goal_xp'] as num).toInt(), t('why_goal', {'t': g['title']}));
-    } else {
-      if ((g['progress'] as int) < (g['target'] as int) && g['rewarded'] == true) {
-        g['rewarded'] = false;
-        if ((data['goals_done'] as int) > 0) data['goals_done'] = (data['goals_done'] as int) - 1;
-      }
-      _commit();
-    }
+    _commit();
   }
 
   void deleteGoal(String gid) {
@@ -882,18 +1023,37 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _endAt = DateTime.now().add(Duration(seconds: remaining));
     _ticker?.cancel();
     _ticker = Timer.periodic(const Duration(milliseconds: 500), (_) => _tick());
+    _scheduleTimerAlert();
     notifyListeners();
   }
 
-  void pauseTimer() {
+  /// Phone only: a system notification at the end time, so it rings even when the app is in the background / closed.
+  void _scheduleTimerAlert() {
+    if (!Notify.supported || _endAt == null) return;
+    if (settings['sound'] != true && settings['notify'] != true) {
+      Notify.cancel();
+      return;
+    }
+    Notify.schedule(
+      _endAt!.add(const Duration(seconds: 2)), // 2s later: if the app is open it rings itself first and cancels this
+      t('notif_title', {'m': total ~/ 60}),
+      rtl ? 'بُوصَلة' : 'Bosalty',
+      // a file from the app's own storage can't be played by the system notification: the chime rings in the background
+      tone: timerSoundId == TimerSounds.customId ? TimerSounds.defaultId : timerSoundId,
+      sound: settings['sound'] == true,
+    );
+  }
+
+  void pauseTimer({bool keepAlert = false}) {
     running = false;
     _ticker?.cancel();
     _ticker = null;
+    if (!keepAlert) Notify.cancel(); // paused / reset by the user: no notification at the old end time
     notifyListeners();
   }
 
-  void resetTimer() {
-    pauseTimer();
+  void resetTimer({bool keepAlert = false}) {
+    pauseTimer(keepAlert: keepAlert);
     ctx = null;
     remaining = total;
     notifyListeners();
@@ -917,13 +1077,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     final now = DateTime.now();
     final when = '${iso(now)}T${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
     sessions.add({'id': newId(), 'when': when, 'minutes': mins, ...c});
-    data['pomodoros'] = (data['pomodoros'] as int) + 1;
-    resetTimer();
+    resetTimer(keepAlert: true); // keep the notification: it is the one that rings on the phone
     if (settings['sound'] == true) {
-      SystemSound.play(SystemSoundType.alert);
+      _ringInApp();
       HapticFeedback.heavyImpact();
     }
-    award(mins, t('why_session', {'m': mins, 'p': pdisp(c['project'] as String)}));
+    _commit();
     if (settings['notify'] == true) {
       final pend = pendingTasks;
       final msg = t('notif_title', {'m': mins}) + ' ' +
@@ -935,6 +1094,17 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
                 }));
       toast(msg);
     }
+  }
+
+  /// Windows / web, and the phone while the app is open: play the chosen tone here.
+  /// Phone in the background: the scheduled notification rings instead.
+  Future<void> _ringInApp() async {
+    if (Notify.supported) {
+      final open = WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+      if (!open && await Notify.canNotify()) return; // in the background the scheduled notification rings
+      if (open) Notify.cancel(); // app is open: ring here once, no second ring from the notification
+    }
+    await TimerSounds.play(timerSoundId);
   }
 
   // --- prayer reminders (system notifications on Android / iOS) ---
@@ -997,7 +1167,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       '-' * 45,
       '📁 ${t('work')}:',
     ];
-    for (final p in projects) {
+    final order = [...projectKeys, ...per.keys.where((k) => !projectKeys.contains(k))];
+    for (final p in order) {
       if ((per[p] ?? 0) > 0) lines.add('  • ${pdisp(p)}: ${fmtMin(per[p]!)}');
     }
     return lines.join('\n');

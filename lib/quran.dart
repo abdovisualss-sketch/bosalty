@@ -19,20 +19,107 @@ class Station {
 }
 
 /// Used only if the station list cannot be downloaded and nothing is cached yet.
+const _egyptRadio = Station('إذاعة القرآن الكريم من القاهرة', 'https://stream.radiojar.com/8s5u5tpdtwzuv');
+
 const _fallbackStations = [
-  Station('إذاعة القرآن الكريم من القاهرة', 'https://stream.radiojar.com/8s5u5tpdtwzuv'),
+  _egyptRadio,
   Station('إذاعة تراتيل', 'https://backup.qurango.net/radio/tarateel'),
   Station('إذاعة مشاري العفاسي', 'https://backup.qurango.net/radio/mishary_alafasi'),
 ];
 
 const _stationsApi = 'https://www.mp3quran.net/api/v3/radios?language=ar';
 
+// ================= sorting stations into groups (by their name) =================
+// The radio list comes from mp3quran.net, so each station only has a name and a URL.
+// These lists decide where a station goes. Edit them freely: add a reciter name, a country...
+// Names are compared after removing tashkeel/spaces and unifying أ/إ/آ, ى/ي and ة/ه.
+
+enum StationGroup { official, reciter, other }
+
+class StationKind {
+  const StationKind(this.group, {this.egyptian = false, this.mujawwad = false});
+  final StationGroup group;
+  final bool egyptian; // an Egyptian reciter
+  final bool mujawwad; // true = mujawwad, false = murattal (only meaningful for reciters)
+}
+
+String _norm(String s) => s
+    .replaceAll(RegExp('[\u064B-\u065F\u0670\u0640]'), '') // tashkeel + tatweel
+    .replaceAll(RegExp('[إأآٱ]'), 'ا')
+    .replaceAll('ى', 'ي')
+    .replaceAll('ة', 'ه')
+    .replaceAll(RegExp(r'\s+'), '')
+    .toLowerCase();
+
+List<String> _k(List<String> words) => [for (final w in words) _norm(w)];
+
+/// Egyptian reciters (a station whose name has any of these goes under "Egyptian").
+final _egyptianReciters = _k([
+  'عبد الباسط', 'الحصري', 'المنشاوي', 'مصطفى إسماعيل', 'محمد رفعت', 'رفعت', 'علي البنا',
+  'الطبلاوي', 'الشعشاعي', 'شعيشع', 'نعينع', 'الشحات', 'عبد العظيم زاهر', 'الفشني',
+  'البهتيمي', 'غلوش', 'محمد جبريل', 'السويسي', 'شبيب', 'رزق حبة', 'عبد الحكم',
+  'اللاهوني', 'الطاروطي',
+]);
+
+/// Reciters known for the mujawwad style, used when the station name does not say "مجود" / "مرتل".
+final _mujawwadReciters = _k([
+  'رفعت', 'مصطفى إسماعيل', 'الطبلاوي', 'نعينع', 'الشحات', 'عبد العظيم زاهر', 'الشعشاعي',
+  'شعيشع', 'الفشني', 'البهتيمي', 'غلوش', 'السويسي', 'شبيب', 'الطاروطي', 'رزق حبة',
+]);
+
+/// Well-known reciters from other countries (only used so their radios are never mistaken for an official station).
+final _otherReciters = _k([
+  'العفاسي', 'المعيقلي', 'السديس', 'الشريم', 'الغامدي', 'الدوسري', 'العجمي', 'الحذيفي',
+  'القطامي', 'الشاطري', 'الهذلي', 'البلوشي', 'الجهني',
+]);
+
+final _mujawwadTag = _k(['مجود']);
+final _murattalTag = _k(['مرتل', 'ترتيل']);
+final _reciterWords = _k(['بصوت', 'القارئ', 'قاري', 'المقرئ', 'شيخ']);
+final _quranWord = _k(['القرآن الكريم', 'القرءان الكريم']);
+final _radioWord = _norm('إذاعة');
+final _egyptPlace = RegExp('مصر(?!ي)'); // Egypt, but not "المصري"
+final _places = _k([
+  'القاهرة', 'من مصر', 'مكة', 'المدينة', 'الحرم', 'السعودية', 'الكويت', 'قطر', 'الإمارات', 'دبي',
+  'الشارقة', 'أبوظبي', 'فلسطين', 'القدس', 'غزة', 'الأردن', 'الجزائر', 'المغرب', 'ليبيا',
+  'تونس', 'السودان', 'سوريا', 'العراق', 'اليمن', 'البحرين', 'لبنان', 'موريتانيا',
+]);
+
+/// Radios that are about something other than a recitation (explanation, adhkar, translation...).
+final _topical = _k(['تفسير', 'ترجمة', 'السنة', 'سيرة', 'أذكار', 'أدعية', 'رقية', 'قصص', 'محاضرات']);
+
+/// Mixed-recitation radios (many reciters in one station): neither a reciter nor an original radio.
+final _mixed = _k(['تراتيل', 'تلاوات', 'نوادر', 'رواية', 'متنوع', 'منوع']);
+
+StationKind classifyStation(String name) {
+  final n = _norm(name);
+  bool any(List<String> keys) => keys.any(n.contains);
+  final mujTag = any(_mujawwadTag), murTag = any(_murattalTag);
+  final egypt = any(_egyptianReciters);
+  final reciterHint = egypt || mujTag || murTag || any(_reciterWords) || any(_otherReciters);
+
+  if (!reciterHint) {
+    if (any(_topical)) return const StationKind(StationGroup.other);
+    if (any(_quranWord) || (n.contains(_radioWord) && (any(_places) || _egyptPlace.hasMatch(n)))) {
+      return const StationKind(StationGroup.official);
+    }
+    if (any(_mixed)) return const StationKind(StationGroup.other);
+  }
+  // A reciter's radio: "mujawwad" if the name says so (or he is known for it), otherwise "murattal".
+  final mujawwad = mujTag || (!murTag && any(_mujawwadReciters));
+  return StationKind(StationGroup.reciter, egyptian: egypt || n.contains(_norm('مصر')), mujawwad: mujawwad);
+}
+
 // ================= controller (one global instance, lives as long as the app) =================
 class QuranRadio extends ChangeNotifier {
   final AudioPlayer player = AudioPlayer();
   List<Station> stations = const [];
   Set<String> favorites = {};
-  bool showFavoritesOnly = false;
+  /// Where the user is: 'home' (the squares) | 'all' | 'reciters' | 'official' | 'fav'.
+  String tab = 'home';
+  /// Inside 'reciters': 'menu' (the squares) | 'all' | 'egypt' | 'mujawwad' | 'murattal'.
+  String reciterKind = 'menu';
+  final Map<String, StationKind> _kinds = {};
   Station? current;
   bool loadingList = false, error = false;
   bool _starting = false, _inited = false;
@@ -75,6 +162,7 @@ class QuranRadio extends ChangeNotifier {
       }
     } catch (_) {}
     if (stations.isEmpty) stations = _fallbackStations;
+    stations = _withEgypt(stations);
     current = _pickLast();
   }
 
@@ -90,14 +178,78 @@ class QuranRadio extends ChangeNotifier {
     notifyListeners();
   }
 
-  void toggleShowFavoritesOnly() {
-    showFavoritesOnly = !showFavoritesOnly;
+  StationKind kindOf(Station s) => _kinds.putIfAbsent('${s.name}|${s.url}', () => classifyStation(s.name));
+
+  bool _isEgyptRadio(Station s) {
+    if (s.url == _egyptRadio.url) return true;
+    if (kindOf(s).group != StationGroup.official) return false;
+    final n = _norm(s.name);
+    return n.contains(_norm('القاهرة')) || _egyptPlace.hasMatch(n);
+  }
+
+  /// Egypt's Quran radio (Cairo): the one from the list if there is one, otherwise the built-in one.
+  Station get egyptRadio {
+    for (final s in stations) {
+      if (_isEgyptRadio(s)) return s;
+    }
+    return _egyptRadio;
+  }
+
+  /// Egypt's radio is always on the list, even if mp3quran does not return it.
+  List<Station> _withEgypt(List<Station> l) => l.any(_isEgyptRadio) ? l : [_egyptRadio, ...l];
+
+  /// The stations that belong to tab [t] (for the reciters tab, narrowed by the filter [k]).
+  List<Station> listFor(String t, [String k = 'all']) {
+    switch (t) {
+      case 'fav':
+        return [for (final s in stations) if (isFavorite(s.url)) s];
+      case 'official':
+        {
+          final o = [for (final s in stations) if (kindOf(s).group == StationGroup.official) s];
+          return [...o.where(_isEgyptRadio), ...o.where((s) => !_isEgyptRadio(s))]; // Egypt first
+        }
+      case 'reciters':
+        return [
+          for (final s in stations)
+            if (kindOf(s).group == StationGroup.reciter &&
+                (k == 'all' ||
+                    (k == 'egypt' && kindOf(s).egyptian) ||
+                    (k == 'mujawwad' && kindOf(s).mujawwad) ||
+                    (k == 'murattal' && !kindOf(s).mujawwad)))
+              s
+        ];
+      default:
+        return stations;
+    }
+  }
+
+  /// What the list on screen shows right now (next / previous buttons walk through this).
+  List<Station> get visible {
+    if (tab == 'reciters') return listFor('reciters', reciterKind == 'menu' ? 'all' : reciterKind);
+    return tab == 'home' ? stations : listFor(tab);
+  }
+
+  bool get canGoBack => tab != 'home';
+
+  void setTab(String t) {
+    tab = t;
+    reciterKind = 'menu';
     notifyListeners();
   }
 
-  void setShowFavorites(bool v) {
-    if (showFavoritesOnly == v) return;
-    showFavoritesOnly = v;
+  void setReciterKind(String k) {
+    reciterKind = k;
+    notifyListeners();
+  }
+
+  /// One step back: reciters list -> reciters squares -> main squares.
+  void back() {
+    if (tab == 'reciters' && reciterKind != 'menu') {
+      reciterKind = 'menu';
+    } else {
+      tab = 'home';
+      reciterKind = 'menu';
+    }
     notifyListeners();
   }
 
@@ -141,7 +293,7 @@ class QuranRadio extends ChangeNotifier {
     try {
       final list = await _fetch();
       if (list.isNotEmpty) {
-        stations = list;
+        stations = _withEgypt(list);
         _prefs?.setString('radio_stations', jsonEncode([for (final s in list) s.toJson()]));
         final keep = current == null ? null : list.where((s) => s.url == current!.url);
         current = (keep != null && keep.isNotEmpty) ? keep.first : _pickLast();
@@ -183,9 +335,12 @@ class QuranRadio extends ChangeNotifier {
   void toggle() => player.playing ? pause() : play();
 
   void _step(int d) {
-    if (stations.isEmpty) return;
-    final i = current == null ? 0 : stations.indexWhere((s) => s.url == current!.url);
-    play(stations[((i < 0 ? 0 : i) + d) % stations.length]);
+    var list = visible;
+    if (list.isEmpty) list = stations;
+    if (list.isEmpty) return;
+    final i = current == null ? -1 : list.indexWhere((s) => s.url == current!.url);
+    final n = list.length;
+    play(list[i < 0 ? (d > 0 ? 0 : n - 1) : (i + d) % n]);
   }
 
   void next() => _step(1);
@@ -454,29 +609,6 @@ class ArmPainter extends CustomPainter {
   bool shouldRepaint(ArmPainter o) => o.t != t;
 }
 
-/// One of the two tabs above the stations list ("All stations" / "Favorites").
-Widget _favTab(AppState s,
-    {required IconData icon, required String label, required bool on, required VoidCallback onTap, bool heart = false}) {
-  final p = s.pal;
-  final fg = on ? (heart ? Colors.redAccent : p.accent) : p.muted;
-  return GestureDetector(
-    onTap: onTap,
-    child: Container(
-      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
-      decoration: BoxDecoration(
-        color: on ? p.sel : p.card,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: on ? fg : Colors.transparent, width: 2),
-      ),
-      child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Icon(icon, size: 18, color: fg),
-        const SizedBox(width: 6),
-        Flexible(child: Txt(label, size: 13, bold: true, color: fg, maxLines: 1)),
-      ]),
-    ),
-  );
-}
-
 // ================= screen =================
 class QuranScreen extends StatelessWidget {
   const QuranScreen({super.key});
@@ -565,60 +697,171 @@ class QuranScreen extends StatelessWidget {
   List<Widget> _tiles(AppState s) {
     final p = s.pal;
     final r = quranRadio;
-    final displayList = r.showFavoritesOnly
-        ? r.stations.where((st) => r.isFavorite(st.url)).toList()
-        : r.stations;
+    final ar = s.rtl;
 
-    final favCount = r.stations.where((st) => r.isFavorite(st.url)).length;
+    String tabName(String t) => t == 'reciters'
+        ? (ar ? 'المقرئين' : 'Reciters')
+        : t == 'official'
+            ? (ar ? 'الإذاعات الأصلية' : 'Official radios')
+            : t == 'fav'
+                ? (ar ? 'المفضلة' : 'Favorites')
+                : t == 'all'
+                    ? (ar ? 'كل الإذاعات' : 'All stations')
+                    : s.t('q_stations');
+    String kindName(String k) => k == 'egypt'
+        ? (ar ? 'مصريين' : 'Egyptian')
+        : k == 'mujawwad'
+            ? (ar ? 'مجوّد' : 'Mujawwad')
+            : k == 'murattal'
+                ? (ar ? 'مرتّل' : 'Murattal')
+                : (ar ? 'الكل' : 'All');
 
-    return [
-      Row(children: [
-        Expanded(child: Txt(s.t('q_stations'), size: 16, bold: true, head: true)),
+    final inReciterList = r.tab == 'reciters' && r.reciterKind != 'menu';
+    final title = inReciterList ? '${tabName('reciters')}  -  ${kindName(r.reciterKind)}' : tabName(r.tab);
+    final showSquares = r.tab == 'home' || (r.tab == 'reciters' && r.reciterKind == 'menu');
+
+    Widget square(IconData icon, String label, int count, VoidCallback onTap) => GestureDetector(
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: p.card,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: p.sel, width: 2),
+            ),
+            child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+              Container(
+                width: 54,
+                height: 54,
+                decoration: BoxDecoration(color: p.sel, shape: BoxShape.circle),
+                child: Icon(icon, color: p.accent, size: 28),
+              ),
+              const SizedBox(height: 10),
+              Txt(label, size: 15, bold: true, align: TextAlign.center, maxLines: 2),
+              const SizedBox(height: 2),
+              Txt('$count ${ar ? 'إذاعة' : 'stations'}', size: 12, color: p.muted, align: TextAlign.center, maxLines: 1),
+            ]),
+          ),
+        );
+
+    Widget grid(List<Widget> kids) => LayoutBuilder(
+          builder: (context, c) => GridView.count(
+            crossAxisCount: c.maxWidth >= 560 ? 3 : 2,
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            mainAxisSpacing: 12,
+            crossAxisSpacing: 12,
+            childAspectRatio: 1.0,
+            children: kids,
+          ),
+        );
+
+    // Egypt's Quran radio (Cairo): one tap to listen
+    Widget egyptBanner() {
+      final eg = r.egyptRadio;
+      final live = r.current?.url == eg.url && r.playing;
+      return GestureDetector(
+        onTap: () => live ? r.pause() : r.play(eg),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: p.accent,
+            borderRadius: BorderRadius.circular(22),
+            boxShadow: [BoxShadow(color: p.accent.withOpacity(0.35), blurRadius: 14, offset: const Offset(0, 5))],
+          ),
+          child: Row(children: [
+            Container(
+              width: 46,
+              height: 46,
+              decoration: BoxDecoration(color: Colors.white.withOpacity(0.2), shape: BoxShape.circle),
+              child: Icon(live ? Icons.pause_rounded : Icons.play_arrow_rounded, color: Colors.white, size: 30),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                Txt(eg.name, size: 15, bold: true, color: Colors.white, maxLines: 2),
+                Txt(ar ? 'إذاعة مصر • بث مباشر' : 'Egypt • Live', size: 12, color: Colors.white70, maxLines: 1),
+              ]),
+            ),
+            Icon(live ? Icons.graphic_eq_rounded : Icons.radio_rounded, color: Colors.white, size: 24),
+          ]),
+        ),
+      );
+    }
+
+    String emptyText() {
+      switch (r.tab) {
+        case 'fav':
+          return ar ? 'لا توجد إذاعات مفضلة بعد. اضغط على القلب بجانب أي إذاعة لتظهر هنا.' : 'No favorite stations yet. Tap the heart next to any station to see it here.';
+        case 'reciters':
+          return ar ? 'لا توجد إذاعات مقرئين في هذا التصنيف الآن. جرّب تحديث الإذاعات.' : 'No reciter stations in this group right now. Try refreshing the stations.';
+        case 'official':
+          return ar ? 'لم نجد إذاعات أصلية للقرآن الكريم في القائمة الحالية. جرّب تحديث الإذاعات.' : 'No official Quran radios found in the current list. Try refreshing the stations.';
+        default:
+          return s.t('q_empty');
+      }
+    }
+
+    // small grey line under a reciter's name: Egyptian • Mujawwad / Murattal
+    String tags(Station st) {
+      final k = r.kindOf(st);
+      return [
+        if (k.egyptian) (ar ? 'مصري' : 'Egyptian'),
+        k.mujawwad ? (ar ? 'مجوّد' : 'Mujawwad') : (ar ? 'مرتّل' : 'Murattal'),
+      ].join('  •  ');
+    }
+
+    final header = Row(children: [
+      if (r.canGoBack)
         IconButton(
-          tooltip: s.t('q_refresh'),
-          onPressed: r.loadingList ? null : r.refreshStations,
-          icon: r.loadingList
-              ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-              : Icon(Icons.refresh_rounded, color: p.muted),
+          tooltip: ar ? 'رجوع' : 'Back',
+          onPressed: r.back,
+          icon: Icon(Icons.arrow_back_rounded, color: p.accent),
         ),
-      ]),
-      const SizedBox(height: 4),
-      Row(children: [
-        Expanded(
-          child: _favTab(
-            s,
-            icon: Icons.radio_rounded,
-            label: '${s.rtl ? 'كل الإذاعات' : 'All stations'}  (${r.stations.length})',
-            on: !r.showFavoritesOnly,
-            onTap: () => r.setShowFavorites(false),
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: _favTab(
-            s,
-            icon: Icons.favorite_rounded,
-            label: '${s.rtl ? 'المفضلة' : 'Favorites'}  ($favCount)',
-            on: r.showFavoritesOnly,
-            onTap: () => r.setShowFavorites(true),
-            heart: true,
-          ),
-        ),
-      ]),
+      Expanded(child: Txt(title, size: 16, bold: true, head: true)),
+      IconButton(
+        tooltip: s.t('q_refresh'),
+        onPressed: r.loadingList ? null : r.refreshStations,
+        icon: r.loadingList
+            ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+            : Icon(Icons.refresh_rounded, color: p.muted),
+      ),
+    ]);
+
+    if (showSquares) {
+      final List<Widget> body;
+      if (r.tab == 'home') {
+        body = [
+          egyptBanner(),
+          const SizedBox(height: 14),
+          grid([
+            square(Icons.record_voice_over_rounded, tabName('reciters'), r.listFor('reciters').length, () => r.setTab('reciters')),
+            square(Icons.verified_rounded, tabName('official'), r.listFor('official').length, () => r.setTab('official')),
+            square(Icons.favorite_rounded, tabName('fav'), r.listFor('fav').length, () => r.setTab('fav')),
+            square(Icons.radio_rounded, tabName('all'), r.stations.length, () => r.setTab('all')),
+          ]),
+        ];
+      } else {
+        body = [
+          grid([
+            square(Icons.flag_rounded, kindName('egypt'), r.listFor('reciters', 'egypt').length, () => r.setReciterKind('egypt')),
+            square(Icons.auto_awesome_rounded, kindName('mujawwad'), r.listFor('reciters', 'mujawwad').length, () => r.setReciterKind('mujawwad')),
+            square(Icons.menu_book_rounded, kindName('murattal'), r.listFor('reciters', 'murattal').length, () => r.setReciterKind('murattal')),
+            square(Icons.groups_rounded, kindName('all'), r.listFor('reciters').length, () => r.setReciterKind('all')),
+          ]),
+        ];
+      }
+      return [header, const SizedBox(height: 8), ...body];
+    }
+
+    final displayList = r.visible;
+    return [
+      header,
       const SizedBox(height: 8),
       if (displayList.isEmpty)
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 30),
-          child: Center(
-            child: Txt(
-              r.showFavoritesOnly
-                  ? (s.rtl ? 'لا توجد إذاعات مفضلة بعد. اضغط على القلب بجانب أي إذاعة لتظهر هنا.' : 'No favorite stations yet. Tap the heart next to any station to see it here.')
-                  : s.t('q_empty'),
-              size: 14,
-              color: p.muted,
-              align: TextAlign.center,
-            ),
-          ),
+          child: Center(child: Txt(emptyText(), size: 14, color: p.muted, align: TextAlign.center)),
         )
       else
         for (final st in displayList)
@@ -639,7 +882,12 @@ class QuranScreen extends StatelessWidget {
                   Icon(on && r.playing ? Icons.graphic_eq_rounded : Icons.radio_rounded,
                       color: on ? p.accent : p.muted, size: 22),
                   const SizedBox(width: 12),
-                  Expanded(child: Txt(st.name, size: 14, bold: on, maxLines: 2)),
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                      Txt(st.name, size: 14, bold: on, maxLines: 2),
+                      if (r.tab == 'reciters') Txt(tags(st), size: 11, color: p.muted, maxLines: 1),
+                    ]),
+                  ),
                   IconButton(
                     icon: Icon(
                       isFav ? Icons.favorite_rounded : Icons.favorite_border_rounded,

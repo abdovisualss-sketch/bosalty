@@ -1,5 +1,8 @@
 import 'dart:convert';
 import 'dart:async';
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'backup.dart';
 import 'onboarding.dart';
 import 'profile.dart';
+import 'sounds.dart';
 import 'state.dart';
 
 // ---------- small building blocks ----------
@@ -88,6 +92,30 @@ class Txt extends StatelessWidget {
   }
 }
 
+// ---------- app-tour markers ----------
+/// Lets the app tour put its numbered markers on parts of a REAL widget (so the tour pictures are the app's own
+/// widgets and always look exactly like the app). In normal use nothing is passed (null) and the widget is drawn as usual.
+typedef PinWrap = Widget Function(int n, Widget child);
+
+Widget pinOn(PinWrap? pin, int n, Widget child) => pin == null ? child : pin(n, child);
+
+/// The numbered badge of the tour: drawn on a picture and repeated in the tips list under it.
+class NumPin extends StatelessWidget {
+  const NumPin(this.n, {super.key});
+  final int n;
+  @override
+  Widget build(BuildContext context) {
+    final p = AppScope.of(context).pal;
+    return Container(
+      width: 22,
+      height: 22,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(color: p.accent, shape: BoxShape.circle, border: Border.all(color: p.card, width: 2)),
+      child: Text('$n', style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w800, height: 1)),
+    );
+  }
+}
+
 /// Centers a screen and limits its width (wide Windows windows).
 class Constrained extends StatelessWidget {
   const Constrained({super.key, required this.child, this.maxWidth = 900});
@@ -136,10 +164,393 @@ class ProjectPill extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(color: p.card, borderRadius: BorderRadius.circular(20)),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Ic(projectIcon[project] ?? 'tasks', color: c, size: 14),
-        const SizedBox(width: 6),
+        if (s.pHasIcon(project)) ...[
+          ProjectAvatar(project, size: 15),
+          const SizedBox(width: 6),
+        ],
         Txt(s.pdisp(project), size: 12, bold: true, sec: sec, color: c),
       ]),
+    );
+  }
+}
+
+/// Small picture for a project: the image the user chose, or the built-in icon.
+/// With no picture it shows nothing (callers write the name), or - with [letter] - the first letter.
+class ProjectAvatar extends StatelessWidget {
+  const ProjectAvatar(this.project, {super.key, this.size = 16, this.letter = false});
+  final String project;
+  final double size;
+  final bool letter;
+  @override
+  Widget build(BuildContext context) {
+    final s = AppScope.of(context);
+    final bytes = s.pimage(project);
+    if (bytes != null) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(size * 0.28),
+        child: Image.memory(bytes, width: size, height: size, fit: BoxFit.cover, gaplessPlayback: true),
+      );
+    }
+    if (s.pHasBuiltin(project) && projectIcon.containsKey(project)) {
+      return Ic(projectIcon[project]!, color: s.pal.proj(project), size: size);
+    }
+    if (!letter) return const SizedBox.shrink();
+    final name = s.pdisp(project);
+    final c = s.pal.proj(project);
+    return Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(color: c.withOpacity(0.14), borderRadius: BorderRadius.circular(size * 0.3)),
+      child: Text(
+        name.isEmpty ? '?' : String.fromCharCode(name.runes.first),
+        style: TextStyle(fontFamily: 'Thmanyah', fontWeight: FontWeight.w700, fontSize: size * 0.55, color: c),
+      ),
+    );
+  }
+}
+
+/// One entry of a project drop-down (task picker, timer, goals, history): picture (if any) + name.
+DropdownMenuItem<String> projectItem(AppState s, String k, {String sec = 'global'}) {
+  return DropdownMenuItem<String>(
+    value: k,
+    child: Row(children: [
+      if (s.pHasIcon(k)) ...[
+        ProjectAvatar(k, size: 20),
+        const SizedBox(width: 8),
+      ],
+      Expanded(child: Txt(s.pdisp(k), size: 13, sec: sec, bold: true, color: s.pal.proj(k), maxLines: 1)),
+    ]),
+  );
+}
+
+/// The project card above the tasks: the picture and the name under it and a small line under that.
+/// With no picture at all, the name itself is written inside the card in the Thmanyah font.
+class ProjectTileFace extends StatelessWidget {
+  const ProjectTileFace({
+    super.key,
+    required this.name,
+    required this.sub,
+    this.asset,
+    this.bytes,
+    this.color,
+    this.selected = false,
+  });
+  final String name, sub;
+  final String? asset; // built-in picture (null = none)
+  final Uint8List? bytes; // picture the user chose (null = none)
+  final Color? color; // colour of the written name
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = AppScope.of(context);
+    final p = s.pal;
+    final textOnly = bytes == null && asset == null;
+    return SizedBox(
+      width: 124,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+        Container(
+          padding: const EdgeInsets.all(3),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: selected ? p.accent : Colors.transparent, width: 2),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: SizedBox(
+              height: 52,
+              child: bytes != null
+                  ? ColoredBox(color: p.card2, child: Image.memory(bytes!, fit: BoxFit.contain, gaplessPlayback: true))
+                  : asset != null
+                      ? AccentImage(asset!, fit: BoxFit.contain)
+                      : Container(
+                          color: p.card2,
+                          alignment: Alignment.center,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              name,
+                              maxLines: 1,
+                              style: TextStyle(
+                                fontFamily: 'Thmanyah',
+                                fontWeight: FontWeight.w700,
+                                fontSize: s.fs(20, 'tasks'),
+                                color: color ?? p.accent,
+                              ),
+                            ),
+                          ),
+                        ),
+            ),
+          ),
+        ),
+        if (!textOnly) ...[
+          const SizedBox(height: 4),
+          Txt(name, size: 12, bold: true, sec: 'tasks', color: selected ? p.accent : p.text, maxLines: 1, align: TextAlign.center),
+        ] else if (sub.isNotEmpty)
+          const SizedBox(height: 4),
+        if (sub.isNotEmpty) Txt(sub, size: 11, sec: 'tasks', color: p.muted, maxLines: 1, align: TextAlign.center),
+      ]),
+    );
+  }
+}
+
+String _pr(AppState s, String ar, String en) => s.rtl ? ar : en;
+
+/// Edit a project (picture, name, line under the name) - or add a new one when [k] is null.
+/// Opened from Settings or by long-pressing a project tile on the Focus screen.
+Future<void> showProjectEditor(BuildContext context, AppState s, String? k) => showDialog<void>(
+      context: context,
+      builder: (_) => AppScope(state: s, child: _ProjectEditor(k: k)),
+    );
+
+/// Asks first, then deletes the project. Returns true if it was deleted.
+Future<bool> confirmDeleteProject(BuildContext context, AppState s, String k) async {
+  final p = s.pal;
+  final name = s.pdisp(k);
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AppScope(
+      state: s,
+      child: AlertDialog(
+        backgroundColor: p.card,
+        title: Txt(_pr(s, 'حذف "$name"؟', 'Delete "$name"?'), size: 17, bold: true, head: true),
+        content: Txt(
+          _pr(s, 'هيتشال من القوائم. المهام والأهداف والجلسات القديمة هتفضل محفوظة ومش هتضيع.',
+              'It will be removed from the lists. Old tasks, goals and sessions are kept, nothing is lost.'),
+          size: 14,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(s.t('cancel'), style: TextStyle(color: p.muted))),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(backgroundColor: kUrgent, foregroundColor: Colors.white),
+            child: Text(s.t('del')),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (ok != true) return false;
+  return s.deleteProject(k);
+}
+
+class _ProjectEditor extends StatefulWidget {
+  const _ProjectEditor({required this.k});
+  final String? k; // null = a new project
+  @override
+  State<_ProjectEditor> createState() => _ProjectEditorState();
+}
+
+class _ProjectEditorState extends State<_ProjectEditor> {
+  late final TextEditingController _name;
+  late final TextEditingController _sub;
+  String _img = ''; // base64 png, '' = none
+  bool _noImg = false; // the built-in picture was removed: the name is written as text
+  String _err = '';
+  bool _busy = false, _ready = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_ready) return;
+    _ready = true;
+    final s = AppScope.of(context);
+    final k = widget.k;
+    _name = TextEditingController(text: k == null ? '' : s.pdisp(k));
+    _sub = TextEditingController(text: k == null ? '' : s.psub(k));
+    final im = k == null ? null : s.projectMeta(k)['image'];
+    _img = im is String ? im : '';
+    _noImg = k != null && s.pNoImage(k);
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _sub.dispose();
+    super.dispose();
+  }
+
+  /// Shrinks the picture to at most 160 px, so it stays small inside the synced data.
+  static Future<String?> _shrink(Uint8List bytes) async {
+    const maxSide = 160;
+    final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+    try {
+      final desc = await ui.ImageDescriptor.encoded(buffer);
+      try {
+        final w = desc.width, h = desc.height;
+        if (w <= 0 || h <= 0) return null;
+        final scale = math.min(1.0, maxSide / math.max(w, h));
+        final codec = await desc.instantiateCodec(
+          targetWidth: math.max(1, (w * scale).round()),
+          targetHeight: math.max(1, (h * scale).round()),
+        );
+        final frame = await codec.getNextFrame();
+        final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+        frame.image.dispose();
+        codec.dispose();
+        if (data == null) return null;
+        return base64Encode(data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes));
+      } finally {
+        desc.dispose();
+      }
+    } finally {
+      buffer.dispose();
+    }
+  }
+
+  Future<void> _pick(AppState s) async {
+    setState(() {
+      _busy = true;
+      _err = '';
+    });
+    try {
+      final bytes = await BackupFiles.pickImageBytes();
+      if (bytes != null) {
+        final b64 = await _shrink(bytes);
+        if (b64 == null) {
+          _err = _pr(s, 'تعذّر قراءة الصورة', 'Could not read that image');
+        } else {
+          _img = b64;
+          _noImg = false;
+        }
+      }
+    } catch (_) {
+      _err = _pr(s, 'تعذّر قراءة الصورة. جرّب PNG أو JPG', 'Could not read that image. Try a PNG or JPG');
+    }
+    if (mounted) setState(() => _busy = false);
+  }
+
+  void _save(AppState s) {
+    final k = widget.k;
+    var name = _name.text.trim();
+    if ((k == null || s.isCustomProject(k)) && name.isEmpty) {
+      setState(() => _err = _pr(s, 'اكتب اسم التصنيف', 'Write a name'));
+      return;
+    }
+    if (k == null) {
+      s.addProject(name: name, sub: _sub.text.trim(), image: _img);
+    } else {
+      if (name == s.defaultProjectName(k)) name = ''; // same as the built-in name: nothing to store
+      s.setProjectMeta(k, name: name, sub: _sub.text.trim(), image: _img, noImage: _noImg);
+    }
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = AppScope.of(context);
+    final p = s.pal;
+    final k = widget.k;
+    final builtin = k != null && !s.isCustomProject(k);
+    Uint8List? bytes;
+    if (_img.isNotEmpty) {
+      try {
+        bytes = base64Decode(_img);
+      } catch (_) {}
+    }
+    final showBuiltin = builtin && projectTile.containsKey(k) && !_noImg && _img.isEmpty;
+    final asset = showBuiltin ? 'assets/brand/${projectTile[k]}.png' : null;
+    final hasPicture = bytes != null || asset != null;
+    return AlertDialog(
+      backgroundColor: p.card,
+      title: Txt(k == null ? _pr(s, 'تصنيف جديد', 'New project') : _pr(s, 'تخصيص المشروع', 'Customize project'),
+          size: 18, bold: true, head: true, color: p.accent),
+      content: SizedBox(
+        width: 360,
+        child: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            // live preview: exactly how the card will look on the Focus screen
+            Center(
+              child: ListenableBuilder(
+                listenable: Listenable.merge([_name, _sub]),
+                builder: (_, __) => ProjectTileFace(
+                  name: _name.text.trim(),
+                  sub: _sub.text.trim(),
+                  asset: asset,
+                  bytes: bytes,
+                  color: k == null ? p.accent : p.proj(k),
+                  selected: true,
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Row(children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: _busy ? null : () => _pick(s),
+                  icon: const Icon(Icons.image_rounded, size: 18),
+                  label: Text(_pr(s, 'اختيار صورة', 'Choose image')),
+                  style: FilledButton.styleFrom(backgroundColor: p.accent, foregroundColor: Colors.white),
+                ),
+              ),
+              if (hasPicture) ...[
+                const SizedBox(width: 8),
+                TextButton(
+                  onPressed: _busy
+                      ? null
+                      : () => setState(() {
+                            _img = '';
+                            _noImg = true;
+                          }),
+                  child: Text(_pr(s, 'إزالة الصورة', 'Remove image'), style: TextStyle(color: p.muted)),
+                ),
+              ],
+            ]),
+            if (!hasPicture)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Txt(_pr(s, 'من غير صورة هيتكتب الاسم بدلها', 'With no picture the name is written instead'),
+                    size: 11, color: p.muted),
+              ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _name,
+              maxLength: 30,
+              style: TextStyle(color: p.text),
+              decoration: fieldDeco(p, _pr(s, 'اسم المشروع', 'Project name')).copyWith(counterText: ''),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _sub,
+              maxLength: 40,
+              style: TextStyle(color: p.text),
+              decoration: fieldDeco(p, _pr(s, 'سطر تحت الاسم (مثال: شركة ديلايت)', 'Line under the name (e.g. Dlight company)'))
+                  .copyWith(counterText: ''),
+            ),
+            if (_err.isNotEmpty)
+              Padding(padding: const EdgeInsets.only(top: 8), child: Txt(_err, size: 12, color: kUrgent)),
+            if (k != null) ...[
+              const SizedBox(height: 6),
+              TextButton.icon(
+                onPressed: () async {
+                  final ok = await confirmDeleteProject(context, s, k);
+                  if (ok && mounted) Navigator.pop(context);
+                },
+                icon: const Icon(Icons.delete_outline_rounded, size: 18, color: kUrgent),
+                label: Text(_pr(s, 'حذف التصنيف', 'Delete project'), style: const TextStyle(color: kUrgent)),
+              ),
+            ],
+          ]),
+        ),
+      ),
+      actions: [
+        if (builtin)
+          TextButton(
+            onPressed: () {
+              s.resetProjectMeta(k!);
+              Navigator.pop(context);
+            },
+            child: Text(_pr(s, 'استعادة الأصل', 'Reset'), style: TextStyle(color: p.muted)),
+          ),
+        TextButton(onPressed: () => Navigator.pop(context), child: Text(s.t('cancel'), style: TextStyle(color: p.muted))),
+        FilledButton(
+          onPressed: () => _save(s),
+          style: FilledButton.styleFrom(backgroundColor: p.accent),
+          child: Text(s.t('save'), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+        ),
+      ],
     );
   }
 }
@@ -493,6 +904,48 @@ class _SettingsSheet extends StatelessWidget {
   const _SettingsSheet();
 
   String _l(AppState s, String ar, String en) => s.rtl ? ar : en;
+
+  /// One project row in Settings: picture + name + the line under it. Tap = edit, bin = delete.
+  Widget _projectRow(BuildContext context, AppState s, String k) {
+    final p = s.pal;
+    final sub = s.psub(k);
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+      leading: SizedBox(width: 36, height: 36, child: Center(child: ProjectAvatar(k, size: 32, letter: true))),
+      title: Txt(s.pdisp(k), size: 14, bold: true, color: p.proj(k)),
+      subtitle: sub.isEmpty ? null : Txt(sub, size: 12, color: p.muted),
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.edit_rounded, size: 18, color: p.muted),
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          tooltip: _l(s, 'حذف', 'Delete'),
+          onPressed: () => confirmDeleteProject(context, s, k),
+          icon: const Icon(Icons.delete_outline_rounded, size: 20, color: kUrgent),
+        ),
+      ]),
+      onTap: () => showProjectEditor(context, s, k),
+    );
+  }
+
+  Widget _addProjectRow(BuildContext context, AppState s) => ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+        leading: const _Badge(Icons.add_rounded),
+        title: Txt(_l(s, 'إضافة تصنيف', 'Add project'), size: 14, bold: true, color: s.pal.accent),
+        onTap: () => showProjectEditor(context, s, null),
+      );
+
+  Widget _restoreProjectsRow(AppState s) => ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+        leading: const _Badge(Icons.restore_rounded),
+        title: Txt(_l(s, 'استعادة التصنيفات المحذوفة', 'Restore deleted projects'), size: 14),
+        onTap: s.restoreProjects,
+      );
+
+  /// Name of the tone that is chosen now (shown under the "Session end tone" row).
+  String _toneLabel(AppState s) {
+    final t = TimerSounds.byId(s.timerSoundId);
+    return t == null ? '' : (s.rtl ? t.ar : t.en);
+  }
 
   Widget _sw(AppState s, IconData icon, String label, String key) => SwitchListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
@@ -995,11 +1448,20 @@ class _SettingsSheet extends StatelessWidget {
             _sw(s, Icons.calendar_month_rounded, _l(s, 'عرض مهام كل الأيام', 'Show tasks of all days'), 'default_all_days'),
           ]),
 
+          // ---- project categories: add / edit / delete ----
+          _Group(title: _l(s, 'تصنيف المشاريع', 'Project categories'), children: [
+            for (final k in s.projectKeys) _projectRow(context, s, k),
+            _addProjectRow(context, s),
+            if (s.hasRemovedDefaults) _restoreProjectsRow(s),
+          ]),
+
           // ---- prayers & alerts ----
           _Group(title: _l(s, 'الصلاة والتنبيهات', 'Prayer & alerts'), children: [
             _sw(s, Icons.wb_twilight_rounded, _l(s, 'شريط مواقيت الصلاة', 'Prayer times bar'), 'show_prayers'),
             _sw(s, Icons.notifications_active_rounded, _l(s, 'تذكير عند كل صلاة', 'Remind me at every prayer'), 'prayer_alerts'),
             _sw(s, Icons.volume_up_rounded, _l(s, 'صوت عند انتهاء الجلسة', 'Sound when the timer ends'), 'sound'),
+            _tile(s, Icons.music_note_rounded, _l(s, 'رنّة نهاية الجلسة', 'Session end tone'), _toneLabel(s),
+                () => showTimerSoundSheet(context)),
             _sw(s, Icons.notifications_rounded, _l(s, 'إشعار عند انتهاء الجلسة', 'Notify when the timer ends'), 'notify'),
           ]),
 

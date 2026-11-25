@@ -168,7 +168,9 @@ class RingPainter extends CustomPainter {
 }
 
 class TimerCard extends StatelessWidget {
-  const TimerCard({super.key});
+  const TimerCard({super.key, this.pin});
+  /// Only the app tour passes this (numbered markers on the ring and the Start button).
+  final PinWrap? pin;
   @override
   Widget build(BuildContext context) {
     final s = AppScope.of(context);
@@ -194,8 +196,8 @@ class TimerCard extends StatelessWidget {
               value: s.timerProject,
               onChanged: s.locked ? null : (v) => s.setTimerProject(v!),
               items: [
-                for (final k in projects)
-                  DropdownMenuItem(value: k, child: Txt(s.pdisp(k), size: 13, sec: 'timer', color: p.proj(k), bold: true)),
+                for (final k in s.projectKeysWith(s.timerProject))
+                  projectItem(s, k, sec: 'timer'),
               ],
             ),
           ),
@@ -214,17 +216,21 @@ class TimerCard extends StatelessWidget {
           ),
         ]),
         const SizedBox(height: 18),
-        SizedBox(
-          width: 230,
-          height: 230,
-          child: CustomPaint(
-            painter: RingPainter(s.total == 0 ? 0 : s.remaining / s.total, p.accent, p.track),
-            child: Center(
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                Txt('${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}',
-                    size: 48, bold: true, head: true, sec: 'timer'),
-                Txt(s.t(state), size: 13, sec: 'timer', color: p.muted),
-              ]),
+        pinOn(
+          pin,
+          2,
+          SizedBox(
+            width: 230,
+            height: 230,
+            child: CustomPaint(
+              painter: RingPainter(s.total == 0 ? 0 : s.remaining / s.total, p.accent, p.track),
+              child: Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Txt('${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}',
+                      size: 48, bold: true, head: true, sec: 'timer'),
+                  Txt(s.t(state), size: 13, sec: 'timer', color: p.muted),
+                ]),
+              ),
             ),
           ),
         ),
@@ -245,14 +251,18 @@ class TimerCard extends StatelessWidget {
         const SizedBox(height: 14),
         Row(children: [
           Expanded(
-            child: FilledButton.icon(
-              style: FilledButton.styleFrom(
-                  backgroundColor: p.accent, minimumSize: const Size.fromHeight(48),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24))),
-              onPressed: s.toggleTimer,
-              icon: Ic(s.running ? 'pause' : 'play', color: Colors.white, size: 18),
-              label: Txt(s.t(s.running ? 'pause' : (started ? 'resume' : 'start')),
-                  size: 15, bold: true, sec: 'timer', color: Colors.white),
+            child: pinOn(
+              pin,
+              1,
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                    backgroundColor: p.accent, minimumSize: const Size.fromHeight(48),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24))),
+                onPressed: s.toggleTimer,
+                icon: Ic(s.running ? 'pause' : 'play', color: Colors.white, size: 18),
+                label: Txt(s.t(s.running ? 'pause' : (started ? 'resume' : 'start')),
+                    size: 15, bold: true, sec: 'timer', color: Colors.white),
+              ),
             ),
           ),
           const SizedBox(width: 10),
@@ -292,8 +302,7 @@ class _AddTaskCardState extends State<AddTaskCard> {
 
   void _add(AppState s) {
     if (ctl.text.trim().isEmpty) return;
-    final xp = urgency == 'مستعجل' ? 30 : (urgency == 'متوسط' ? 20 : (urgency == 'سهل' ? 10 : 5));
-    if (s.addTask(ctl.text, project, xp, s.day, goalId)) {
+    if (s.addTask(ctl.text, project, s.day, goalId)) {
       s.tasks.last['urgency'] = urgency;
       ctl.clear();
     }
@@ -303,6 +312,8 @@ class _AddTaskCardState extends State<AddTaskCard> {
   Widget build(BuildContext context) {
     final s = AppScope.of(context);
     final p = s.pal;
+    final keys = s.projectKeys;
+    if (!keys.contains(project)) project = keys.first; // the chosen project was deleted
     final monthGoals = s.goalsOfMonth(monthKeyOf(s.day));
     final gid = monthGoals.any((g) => g['id'] == goalId) ? goalId : null;
     return Box(
@@ -317,8 +328,8 @@ class _AddTaskCardState extends State<AddTaskCard> {
         Row(children: [
           Expanded(
             child: dd<String>(p, value: project, onChanged: (v) => setState(() => project = v!), items: [
-              for (final k in projects)
-                DropdownMenuItem(value: k, child: Txt(s.pdisp(k), size: 13, bold: true, color: p.proj(k), maxLines: 1)),
+              for (final k in keys)
+                projectItem(s, k),
             ]),
           ),
           const SizedBox(width: 8),
@@ -414,27 +425,12 @@ class ProjectFilter extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = AppScope.of(context);
     final p = s.pal;
-    final keys = ['All', ...projects];
+    final keys = ['All', ...s.projectKeys];
     if (s.settings['show_tiles'] == true) {
-      return SizedBox(
-        height: 64,
-        child: ListView(scrollDirection: Axis.horizontal, children: [
-          for (final k in keys)
-            GestureDetector(
-              onTap: () => s.setFilter(k),
-              child: Container(
-                margin: const EdgeInsetsDirectional.only(end: 8),
-                padding: const EdgeInsets.all(3),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: s.filter == k ? p.accent : Colors.transparent, width: 2),
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: AccentImage('assets/brand/${projectTile[k]}.png', height: 52, fit: BoxFit.cover),
-                ),
-              ),
-            ),
+      return SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          for (final k in keys) _ProjectTile(k: k),
         ]),
       );
     }
@@ -452,11 +448,42 @@ class ProjectFilter extends StatelessWidget {
   }
 }
 
+/// One project card: tap = filter the tasks, long-press (or right-click) = edit name / picture.
+class _ProjectTile extends StatelessWidget {
+  const _ProjectTile({required this.k});
+  final String k;
+  @override
+  Widget build(BuildContext context) {
+    final s = AppScope.of(context);
+    final isAll = k == 'All';
+    void edit() => showProjectEditor(context, s, k);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => s.setFilter(k),
+      onLongPress: isAll ? null : edit,
+      onSecondaryTap: isAll ? null : edit,
+      child: Padding(
+        padding: const EdgeInsetsDirectional.only(end: 8),
+        child: ProjectTileFace(
+          name: s.pdisp(k),
+          sub: isAll ? '' : s.psub(k),
+          asset: (isAll || s.pHasBuiltin(k)) ? 'assets/brand/${projectTile[k]}.png' : null,
+          bytes: isAll ? null : s.pimage(k),
+          color: isAll ? null : s.pal.proj(k),
+          selected: s.filter == k,
+        ),
+      ),
+    );
+  }
+}
+
 // ---------- task card ----------
 class TaskCard extends StatelessWidget {
-  const TaskCard({super.key, required this.task, required this.minutes});
+  const TaskCard({super.key, required this.task, required this.minutes, this.pin});
   final Map<String, dynamic> task;
   final int minutes;
+  /// Only the app tour passes this (numbered markers on the circle and the play button).
+  final PinWrap? pin;
 
   @override
   Widget build(BuildContext context) {
@@ -482,18 +509,24 @@ class TaskCard extends StatelessWidget {
         border: Border.all(color: isSel ? p.accent : Colors.transparent, width: 2),
       ),
       child: Row(children: [
-        GestureDetector(
-          onTap: () => s.toggleTaskDone(id),
-          child: Container(
-            width: 30,
-            height: 30,
-            margin: const EdgeInsetsDirectional.only(end: 10),
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: done ? p.accent : Colors.transparent,
-              border: Border.all(color: done ? p.accent : p.muted, width: 2),
+        Padding(
+          padding: const EdgeInsetsDirectional.only(end: 10),
+          child: pinOn(
+            pin,
+            1,
+            GestureDetector(
+              onTap: () => s.toggleTaskDone(id),
+              child: Container(
+                width: 30,
+                height: 30,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: done ? p.accent : Colors.transparent,
+                  border: Border.all(color: done ? p.accent : p.muted, width: 2),
+                ),
+                child: done ? const Center(child: Ic('check', color: Colors.white, size: 16)) : null,
+              ),
             ),
-            child: done ? const Center(child: Ic('check', color: Colors.white, size: 16)) : null,
           ),
         ),
         Expanded(
@@ -517,10 +550,14 @@ class TaskCard extends StatelessWidget {
           ]),
         ),
         if (!done)
-          IconButton(
-              visualDensity: VisualDensity.compact,
-              onPressed: () => s.selectTask(id),
-              icon: Ic('play', color: isSel ? p.accent : p.muted, size: 18)),
+          pinOn(
+            pin,
+            2,
+            IconButton(
+                visualDensity: VisualDensity.compact,
+                onPressed: () => s.selectTask(id),
+                icon: Ic('play', color: isSel ? p.accent : p.muted, size: 18)),
+          ),
         IconButton(
             visualDensity: VisualDensity.compact,
             onPressed: () => editTaskDialog(context, id),
@@ -559,8 +596,8 @@ void editTaskDialog(BuildContext context, String id) {
               TextField(controller: ctl, style: TextStyle(color: p.text), decoration: fieldDeco(p, s.t('task'))),
               const SizedBox(height: 10),
               dd<String>(p, value: project, onChanged: (v) => setSt(() => project = v!), items: [
-                for (final k in projects)
-                  DropdownMenuItem(value: k, child: Txt(s.pdisp(k), size: 13, bold: true, color: p.proj(k))),
+                for (final k in s.projectKeysWith(project))
+                  projectItem(s, k),
               ]),
               const SizedBox(height: 10),
               dd<String>(p, value: urgency, onChanged: (v) => setSt(() => urgency = v!), items: [
@@ -592,9 +629,8 @@ void editTaskDialog(BuildContext context, String id) {
                   s.toast(s.t('empty_title'));
                   return;
                 }
-                final xp = urgency == 'مستعجل' ? 30 : (urgency == 'متوسط' ? 20 : (urgency == 'سهل' ? 10 : 5));
                 s.updateTask(id,
-                    title: ctl.text, project: project, xp: xp, d: date,
+                    title: ctl.text, project: project, d: date,
                     goalId: gid, clearGoal: gid == null);
                 task['urgency'] = urgency;
                 Navigator.pop(dctx);

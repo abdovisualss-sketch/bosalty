@@ -52,4 +52,11 @@ class BackupFiles {
     final b = await f.readAsBytes();
     return utf8.decode(b, allowMalformed: true);
   }
+
+  /// Lets the user pick a picture and returns its bytes (null if cancelled).
+  static Future<Uint8List?> pickImageBytes() async {
+    final f = await FilePicker.pickFile();
+    if (f == null) return null;
+    return await f.readAsBytes();
+  }
 }
