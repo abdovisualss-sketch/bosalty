@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'mushaf.dart';
 import 'state.dart';
 import 'ui.dart';
+import 'worship_log.dart';
 
 // ================= History =================
 class HistoryScreen extends StatelessWidget {
@@ -28,16 +30,33 @@ class HistoryScreen extends StatelessWidget {
     ];
     var shown = all.where((e) => s.histFilter == 'All' || e.value['project'] == s.histFilter).toList();
     shown.sort((a, b) => b.key.compareTo(a.key));
+    // Everything that happened, newest first: focus sessions, and (when "All projects" is shown)
+    // the adhkar lists you finished and the Quran you read.
+    final entries = <_HistEntry>[
+      for (final e in shown)
+        _HistEntry(
+          e.key,
+          e.value['minutes'] as int,
+          SessionRow(
+            at: e.key,
+            project: e.value['project'] as String,
+            task: (e.value['task_title'] ?? '').toString().isNotEmpty ? e.value['task_title'] as String : '',
+            minutes: e.value['minutes'] as num,
+          ),
+        ),
+      if (s.histFilter == 'All') ..._worshipEntries(s),
+    ];
+    entries.sort((a, b) => b.at.compareTo(a.at));
     final dayTotals = <DateTime, int>{};
-    for (final e in shown) {
-      final k = dateOnly(e.key);
-      dayTotals[k] = (dayTotals[k] ?? 0) + (e.value['minutes'] as int);
+    for (final e in entries) {
+      final k = dateOnly(e.at);
+      dayTotals[k] = (dayTotals[k] ?? 0) + e.minutes;
     }
 
     final rows = <Widget>[];
     DateTime? last;
-    for (final e in shown) {
-      final day = dateOnly(e.key);
+    for (final e in entries) {
+      final day = dateOnly(e.at);
       if (day != last) {
         last = day;
         final label = day == today
@@ -49,18 +68,11 @@ class HistoryScreen extends StatelessWidget {
           padding: const EdgeInsets.only(top: 14, bottom: 4),
           child: Row(children: [
             Expanded(child: Txt(label, size: 15, bold: true, sec: 'history')),
-            Txt(s.fmtMin(dayTotals[day]!), size: 13, sec: 'history', color: p.muted),
+            if (dayTotals[day]! > 0) Txt(s.fmtMin(dayTotals[day]!), size: 13, sec: 'history', color: p.muted),
           ]),
         ));
       }
-      final x = e.value;
-      final hasTask = (x['task_title'] ?? '').toString().isNotEmpty;
-      rows.add(SessionRow(
-        at: e.key,
-        project: x['project'] as String,
-        task: hasTask ? x['task_title'] as String : '',
-        minutes: x['minutes'] as num,
-      ));
+      rows.add(e.row);
     }
 
     return ListView(
@@ -86,6 +98,124 @@ class HistoryScreen extends StatelessWidget {
         else
           ...rows,
       ],
+    );
+  }
+}
+
+/// One line of the History list (a focus session, an adhkar list, a day of Quran reading).
+class _HistEntry {
+  const _HistEntry(this.at, this.minutes, this.row);
+  final DateTime at;
+  final int minutes; // focus minutes (0 for worship lines)
+  final Widget row;
+}
+
+/// The adhkar lists finished and the Quran read, as simple History lines.
+List<_HistEntry> _worshipEntries(AppState s) {
+  String L(String ar, String en) => s.rtl ? ar : en;
+  final out = <_HistEntry>[];
+
+  for (final x in WorshipLog.adhkarEntries(s)) {
+    final at = DateTime.tryParse('${x['when'] ?? ''}');
+    if (at == null) continue;
+    final kind = '${x['kind']}';
+    final cnt = (x['n'] as num?)?.toInt() ?? 0;
+    out.add(_HistEntry(
+      at,
+      0,
+      WorshipRow(
+        at: at,
+        icon: WorshipLog.adhkarIcon(kind),
+        color: WorshipLog.adhkarColor(kind),
+        title: WorshipLog.adhkarTitle(s, kind),
+        detail: cnt > 0
+            ? L('أتممتها كاملة · ${arNum(cnt)} ذكر', 'Completed · $cnt adhkar')
+            : L('أتممتها كاملة', 'Completed'),
+        value: '✓',
+      ),
+    ));
+  }
+
+  final q = QuranData.cached; // null only while the Quran text is still loading
+  for (final key in WorshipLog.quranDays(s)) {
+    final d = parseDate(key);
+    if (d == null) continue;
+    final reads = WorshipLog.quranOn(s, d);
+    if (reads.isEmpty) continue;
+    final lastMin = reads.last.minute;
+    final at = DateTime(d.year, d.month, d.day, lastMin ~/ 60, lastMin % 60);
+    String detail;
+    var pages = reads.length;
+    if (q != null) {
+      final day = QuranDay.of(q, reads);
+      pages = day.pages;
+      final names = [for (final su in day.surahAyat.keys) s.rtl ? q.names[su - 1] : q.translit[su - 1]];
+      detail = '${names.take(3).join(' · ')}${names.length > 3 ? ' …' : ''} · ${L('${arNum(day.ayat)} آية', '${day.ayat} verses')}';
+    } else {
+      final nums = [for (final r in reads) r.page]..sort();
+      detail = L('ص ${arNum(nums.first)} – ${arNum(nums.last)}', 'p. ${nums.first} – ${nums.last}');
+    }
+    out.add(_HistEntry(
+      at,
+      0,
+      WorshipRow(
+        at: at,
+        icon: Icons.auto_stories_rounded,
+        color: s.pal.accent,
+        title: L('قراءة القرآن', 'Quran reading'),
+        detail: detail,
+        value: pagesText(s, pages),
+      ),
+    ));
+  }
+  return out;
+}
+
+/// One worship line in the History list: icon, what it was, a short detail, and the time.
+class WorshipRow extends StatelessWidget {
+  const WorshipRow({
+    super.key,
+    required this.at,
+    required this.icon,
+    required this.color,
+    required this.title,
+    required this.detail,
+    required this.value,
+  });
+  final DateTime at;
+  final IconData icon;
+  final Color color;
+  final String title, detail, value;
+  @override
+  Widget build(BuildContext context) {
+    final s = AppScope.of(context);
+    final p = s.pal;
+    return Box(
+      color: p.card2,
+      radius: 16,
+      margin: const EdgeInsets.symmetric(vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      child: Row(children: [
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(color: color.withOpacity(0.16), shape: BoxShape.circle),
+          child: Icon(icon, color: color, size: 18),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Txt(title, size: 14, bold: true, sec: 'history', maxLines: 1),
+            if (detail.isNotEmpty) Txt(detail, size: 12, sec: 'history', color: p.muted, maxLines: 2),
+          ]),
+        ),
+        const SizedBox(width: 8),
+        Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.end, children: [
+          Txt(value, size: 13, bold: true, sec: 'history', color: color),
+          Txt('${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}',
+              size: 11, sec: 'history', color: p.muted),
+        ]),
+      ]),
     );
   }
 }
@@ -168,13 +298,11 @@ class GoalsScreen extends StatefulWidget {
 
 class _GoalsScreenState extends State<GoalsScreen> {
   final title = TextEditingController();
-  final target = TextEditingController();
   String cat = projects[0];
 
   @override
   void dispose() {
     title.dispose();
-    target.dispose();
     super.dispose();
   }
 
@@ -209,16 +337,6 @@ class _GoalsScreenState extends State<GoalsScreen> {
             TextField(controller: title, style: TextStyle(color: p.text), decoration: fieldDeco(p, s.t('goal_ph'))),
             const SizedBox(height: 8),
             Row(children: [
-              SizedBox(
-                width: 90,
-                child: TextField(
-                  controller: target,
-                  keyboardType: TextInputType.number,
-                  style: TextStyle(color: p.text),
-                  decoration: fieldDeco(p, s.t('target')),
-                ),
-              ),
-              const SizedBox(width: 8),
               Expanded(
                 child: dd<String>(p, value: cat, onChanged: (v) => setState(() => cat = v!), items: [
                   for (final k in keys) projectItem(s, k),
@@ -230,10 +348,7 @@ class _GoalsScreenState extends State<GoalsScreen> {
                     backgroundColor: p.accent, minimumSize: const Size(0, 48),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22))),
                 onPressed: () {
-                  if (s.addGoal(title.text, target.text, cat)) {
-                    title.clear();
-                    target.clear();
-                  }
+                  if (s.addGoal(title.text, '', cat)) title.clear();
                 },
                 child: const Ic('plus', color: Colors.white, size: 18),
               ),
@@ -257,7 +372,7 @@ List<String> kMonthsOf(AppState s) => [for (var i = 1; i <= 12; i++) s.monthName
 class GoalCard extends StatelessWidget {
   const GoalCard({super.key, required this.goal, this.pin});
   final Map<String, dynamic> goal;
-  /// Only the app tour passes this (a numbered marker on the +1 button).
+  /// Only the app tour passes this (a numbered marker on the tick).
   final PinWrap? pin;
   @override
   Widget build(BuildContext context) {
@@ -265,8 +380,7 @@ class GoalCard extends StatelessWidget {
     final p = s.pal;
     final cat = goal['category'] as String;
     final color = p.proj(cat);
-    final prog = goal['progress'] as int, tgt = goal['target'] as int;
-    final complete = prog >= tgt;
+    final complete = (goal['progress'] as int) >= (goal['target'] as int); // goals are done / not done
     final gid = goal['id'] as String;
     final linked = s.tasks.where((x) => x['goal'] == gid).toList();
     return Box(
@@ -275,36 +389,45 @@ class GoalCard extends StatelessWidget {
       margin: const EdgeInsets.only(top: 12),
       child: Column(children: [
         Row(children: [
-          if (complete) ...[Ic('check', color: color, size: 16), const SizedBox(width: 6)],
-          Expanded(child: Txt(goal['title'] as String, size: 15, bold: true, sec: 'goals', color: complete ? color : p.text)),
+          // the tick: tap it to mark the goal done (tap again to undo)
+          pinOn(
+            pin,
+            1,
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => s.toggleGoal(gid),
+              child: SizedBox(
+                width: 40,
+                height: 40,
+                child: Center(
+                  child: Container(
+                    width: 26,
+                    height: 26,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: complete ? color : Colors.transparent,
+                      border: Border.all(color: color, width: 2),
+                    ),
+                    child: complete ? Icon(Icons.check_rounded, size: 18, color: p.onProj) : null,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Txt(goal['title'] as String,
+                size: 15, bold: true, sec: 'goals', strike: complete, color: complete ? p.muted : p.text),
+          ),
           ProjectPill(cat, sec: 'goals'),
           IconButton(
               visualDensity: VisualDensity.compact,
               onPressed: () => s.deleteGoal(gid),
               icon: Ic('trash', color: p.muted, size: 16)),
         ]),
-        const SizedBox(height: 6),
-        Row(children: [
-          _Round(label: '−1', bg: p.card, fg: p.text, onTap: () => s.bumpGoal(gid, -1)),
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              child: LinearProgressIndicator(
-                value: tgt == 0 ? 0.0 : (prog / tgt).clamp(0.0, 1.0).toDouble(),
-                minHeight: 12,
-                borderRadius: BorderRadius.circular(6),
-                backgroundColor: p.track,
-                color: color,
-              ),
-            ),
-          ),
-          Txt('$prog / $tgt', size: 13, bold: true, sec: 'goals'),
-          const SizedBox(width: 10),
-          pinOn(pin, 1, _Round(label: '+1', bg: color, fg: p.onProj, onTap: () => s.bumpGoal(gid, 1))),
-        ]),
         for (final x in linked)
           Padding(
-            padding: const EdgeInsets.only(top: 8),
+            padding: const EdgeInsetsDirectional.only(top: 6, start: 46),
             child: Row(children: [
               Ic(x['done'] == true ? 'check' : 'tasks', color: x['done'] == true ? p.accent : p.muted, size: 14),
               const SizedBox(width: 8),
@@ -317,24 +440,6 @@ class GoalCard extends StatelessWidget {
       ]),
     );
   }
-}
-
-class _Round extends StatelessWidget {
-  const _Round({required this.label, required this.bg, required this.fg, required this.onTap});
-  final String label;
-  final Color bg, fg;
-  final VoidCallback onTap;
-  @override
-  Widget build(BuildContext context) => GestureDetector(
-        onTap: onTap,
-        child: Container(
-          width: 48,
-          height: 36,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(18)),
-          child: Txt(label, size: 14, bold: true, sec: 'goals', color: fg),
-        ),
-      );
 }
 
 void showReport(BuildContext context) {

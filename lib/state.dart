@@ -873,24 +873,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  /// Ticks / unticks a task. (A goal is ticked by hand with [toggleGoal]; a task linked to a goal only groups under it.)
   void toggleTaskDone(String id) {
     final x = findTask(id);
     if (x == null) return;
-    if (x['done'] == true) {
-      x['done'] = false;
-      if (x['goal'] != null) {
-        bumpGoal(x['goal'] as String, -1);
-      } else {
-        _commit();
-      }
-    } else {
-      x['done'] = true;
-      if (x['goal'] != null) {
-        bumpGoal(x['goal'] as String, 1);
-      } else {
-        _commit();
-      }
-    }
+    x['done'] = x['done'] != true;
+    _commit();
   }
 
   void deleteTask(String id) {
@@ -964,6 +952,19 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     });
     _commit();
     return true;
+  }
+
+  /// A goal is done or not done: ticking sets its progress to the target, unticking sets it back to 0.
+  /// (Old goals that had a number: done = progress reached the target.)
+  void toggleGoal(String gid) {
+    for (final g in goals) {
+      if (g['id'] == gid) {
+        final done = (g['progress'] as int) >= (g['target'] as int);
+        g['progress'] = done ? 0 : g['target'];
+        _commit();
+        return;
+      }
+    }
   }
 
   void bumpGoal(String gid, int delta) {

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import 'state.dart';
 import 'ui.dart';
+import 'worship_log.dart';
 
 // ================= data =================
 class Dhikr {
@@ -608,9 +609,24 @@ class _AdhkarScreenState extends State<AdhkarScreen> {
     if (finished) {
       HapticFeedback.mediumImpact();
       s.save();
+      _logIfSetDone(s);
     } else {
       HapticFeedback.selectionClick();
       _saveTimer = Timer(const Duration(milliseconds: 500), s.save);
+    }
+  }
+
+  /// When every dhikr of the open list is finished, writes it to History (once a day per list).
+  void _logIfSetDone(AppState s) {
+    final items = _items(s);
+    if (items.isEmpty) return;
+    final done = _doneToday(s);
+    if (!items.every((i) => done.contains(i.d.id))) return;
+    final kind = WorshipLog.adhkarKinds[_tab];
+    if (WorshipLog.logAdhkar(s, kind, items.length)) {
+      s.save();
+      final name = WorshipLog.adhkarTitle(s, kind);
+      s.toast(_l(s, 'تم تسجيل $name في السجل ✓', '$name saved to History ✓'));
     }
   }
 
@@ -862,6 +878,7 @@ class _AdhkarScreenState extends State<AdhkarScreen> {
                 onComplete: () {
                   HapticFeedback.mediumImpact();
                   _mut(() => _complete(s, it.d));
+                  _logIfSetDone(s);
                 },
                 onFav: () => _mut(() => _toggleFav(s, it.d.id)),
                 onDelete: () => _confirmDelete(s, it.d.id),

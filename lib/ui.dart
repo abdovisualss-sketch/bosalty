@@ -602,7 +602,11 @@ InputDecoration fieldDeco(Pal p, String hint) => InputDecoration(
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
     );
 
-// ---------- header: logo + open-tasks chip + tour + settings ----------
+// ---------- header: logo + open-tasks chip + help (?) + settings (gear) ----------
+/// True while the Mushaf is open in its reading view AND its tab is the visible one
+/// (set by MushafScreen). The header hides itself then, so the page gets the whole screen.
+final ValueNotifier<bool> mushafReading = ValueNotifier<bool>(false);
+
 class Header extends StatelessWidget {
   const Header({super.key});
   @override
@@ -610,28 +614,35 @@ class Header extends StatelessWidget {
     final s = AppScope.of(context);
     final p = s.pal;
     final logo = MediaQuery.sizeOf(context).width >= 760 ? 104.0 : 84.0;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 4, 8, 6),
-      child: Row(children: [
-        AccentImage('assets/brand/seal.png', width: logo, height: logo),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Align(
-            alignment: AlignmentDirectional.centerStart,
-            child: InfoChip('tasks', '${s.pendingTasks.length}'),
-          ),
-        ),
-        IconButton(
-          onPressed: () => Onboarding.show(context),
-          tooltip: s.rtl ? 'جولة في التطبيق' : 'App tour',
-          icon: Icon(Icons.tour_rounded, color: p.muted),
-        ),
-        IconButton(
-          onPressed: () => showSettings(context),
-          tooltip: s.t('settings'),
-          icon: Icon(Icons.tune, color: p.muted),
-        ),
-      ]),
+    return ValueListenableBuilder<bool>(
+      valueListenable: mushafReading,
+      builder: (context, reading, _) {
+        // Hiding on the Mushaf tab is decided in main.dart (s.tab != 5), not by this notifier:
+        // the notifier could stay true after leaving the Mushaf and hide the header everywhere.
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 8, 6),
+          child: Row(children: [
+            AccentImage('assets/brand/seal.png', width: logo, height: logo),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: InfoChip('tasks', '${s.pendingTasks.length}'),
+              ),
+            ),
+            IconButton(
+              onPressed: () => Onboarding.show(context),
+              tooltip: s.rtl ? 'مساعدة' : 'Help',
+              icon: Icon(Icons.help_outline_rounded, color: p.muted),
+            ),
+            IconButton(
+              onPressed: () => showSettings(context),
+              tooltip: s.t('settings'),
+              icon: Icon(Icons.settings_rounded, color: p.muted),
+            ),
+          ]),
+        );
+      },
     );
   }
 }
@@ -1436,8 +1447,6 @@ class _SettingsSheet extends StatelessWidget {
               onTap: () => s.toggleLang(),
             ),
             _accentRow(s),
-            _textSize(s),
-            _mushafFont(s),
           ]),
 
           // ---- focus ----
@@ -1446,13 +1455,6 @@ class _SettingsSheet extends StatelessWidget {
             _sw(s, Icons.view_agenda_rounded, _l(s, 'بطاقات المهام المدمجة', 'Compact task cards'), 'compact_tasks'),
             _sw(s, Icons.grid_view_rounded, _l(s, 'إظهار صور المشاريع فوق المهام', 'Project tiles above tasks'), 'show_tiles'),
             _sw(s, Icons.calendar_month_rounded, _l(s, 'عرض مهام كل الأيام', 'Show tasks of all days'), 'default_all_days'),
-          ]),
-
-          // ---- project categories: add / edit / delete ----
-          _Group(title: _l(s, 'تصنيف المشاريع', 'Project categories'), children: [
-            for (final k in s.projectKeys) _projectRow(context, s, k),
-            _addProjectRow(context, s),
-            if (s.hasRemovedDefaults) _restoreProjectsRow(s),
           ]),
 
           // ---- prayers & alerts ----
@@ -1465,8 +1467,27 @@ class _SettingsSheet extends StatelessWidget {
             _sw(s, Icons.notifications_rounded, _l(s, 'إشعار عند انتهاء الجلسة', 'Notify when the timer ends'), 'notify'),
           ]),
 
-          // ---- fine tuning (collapsed) ----
-          _Group(title: _l(s, 'متقدم', 'Advanced'), children: [
+          // ---- everything else: closed until you open it ----
+          _Group(title: _l(s, 'المزيد', 'More'), children: [
+            _expander(
+              context,
+              s,
+              icon: Icons.text_fields_rounded,
+              title: _l(s, 'حجم الخط والقراءة', 'Text & reading size'),
+              children: [_textSize(s), _mushafFont(s)],
+            ),
+            _expander(
+              context,
+              s,
+              icon: Icons.folder_rounded,
+              title: _l(s, 'تصنيف المشاريع', 'Project categories'),
+              subtitle: _l(s, '${s.projectKeys.length} تصنيف', '${s.projectKeys.length} projects'),
+              children: [
+                for (final k in s.projectKeys) _projectRow(context, s, k),
+                _addProjectRow(context, s),
+                if (s.hasRemovedDefaults) _restoreProjectsRow(s),
+              ],
+            ),
             _expander(
               context,
               s,
@@ -1475,33 +1496,34 @@ class _SettingsSheet extends StatelessWidget {
               subtitle: _l(s, 'أحجام الخطوط وتخطيط شاشة التركيز', 'Text sizes and focus-screen layout'),
               children: _advanced(s),
             ),
-          ]),
-
-          // ---- backup ----
-          _Group(title: _l(s, 'النسخ الاحتياطي', 'Backup'), children: [
-            _tile(s, Icons.save_alt_rounded, _l(s, 'حفظ نسخة احتياطية كملف', 'Save backup as a file'),
-                _l(s, 'ملف JSON فيه كل بياناتك، احتفظ به في مكان آمن', 'A JSON file with all your data. Keep it somewhere safe'),
-                () => _saveFile(context, s)),
-            _tile(s, Icons.copy_rounded, _l(s, 'نسخ النسخة الاحتياطية كنص', 'Copy backup as text'),
-                _l(s, 'ينسخها للحافظة لتلصقها في ملاحظات أو رسالة', 'Copies it to the clipboard to paste in a note or chat'),
-                () => _exportBackup(context, s)),
-            _tile(s, Icons.folder_open_rounded, _l(s, 'استرجاع من ملف', 'Restore from a file'),
-                _l(s, 'اختر ملف نسخة احتياطية سبق حفظه', 'Pick a backup file you saved before'),
-                () => _restoreFile(context, s)),
-            _tile(s, Icons.content_paste_rounded, _l(s, 'استرجاع من نص', 'Restore from pasted text'),
-                _l(s, 'الصق نص النسخة الاحتياطية', 'Paste the backup text'),
-                () => _importBackup(context, s)),
-            _tile(s, Icons.history_rounded, _l(s, 'النسخ التلقائية على الجهاز', 'Automatic copies on this device'),
-                _l(s, 'يحفظ التطبيق نسخة كل يوم لآخر 5 أيام', 'The app keeps one copy per day for the last 5 days'),
-                () => _autoCopies(context, s)),
-            if (s.hasUndoRestore)
-              _tile(s, Icons.undo_rounded, _l(s, 'التراجع عن آخر استرجاع', 'Undo last restore'),
-                  _l(s, 'يرجّع بياناتك كما كانت قبل الاسترجاع', 'Brings back your data as it was before the restore'),
-                  () => _undoRestore(context, s)),
-          ]),
-
-          // ---- account (collapsed) ----
-          _Group(title: _l(s, 'الحساب', 'Account'), children: [
+            _expander(
+              context,
+              s,
+              icon: Icons.save_alt_rounded,
+              title: _l(s, 'النسخ الاحتياطي', 'Backup'),
+              subtitle: _l(s, 'احفظ بياناتك أو استرجعها', 'Save or restore your data'),
+              children: [
+                _tile(s, Icons.save_alt_rounded, _l(s, 'حفظ نسخة احتياطية كملف', 'Save backup as a file'),
+                    _l(s, 'ملف JSON فيه كل بياناتك، احتفظ به في مكان آمن', 'A JSON file with all your data. Keep it somewhere safe'),
+                    () => _saveFile(context, s)),
+                _tile(s, Icons.copy_rounded, _l(s, 'نسخ النسخة الاحتياطية كنص', 'Copy backup as text'),
+                    _l(s, 'ينسخها للحافظة لتلصقها في ملاحظات أو رسالة', 'Copies it to the clipboard to paste in a note or chat'),
+                    () => _exportBackup(context, s)),
+                _tile(s, Icons.folder_open_rounded, _l(s, 'استرجاع من ملف', 'Restore from a file'),
+                    _l(s, 'اختر ملف نسخة احتياطية سبق حفظه', 'Pick a backup file you saved before'),
+                    () => _restoreFile(context, s)),
+                _tile(s, Icons.content_paste_rounded, _l(s, 'استرجاع من نص', 'Restore from pasted text'),
+                    _l(s, 'الصق نص النسخة الاحتياطية', 'Paste the backup text'),
+                    () => _importBackup(context, s)),
+                _tile(s, Icons.history_rounded, _l(s, 'النسخ التلقائية على الجهاز', 'Automatic copies on this device'),
+                    _l(s, 'يحفظ التطبيق نسخة كل يوم لآخر 5 أيام', 'The app keeps one copy per day for the last 5 days'),
+                    () => _autoCopies(context, s)),
+                if (s.hasUndoRestore)
+                  _tile(s, Icons.undo_rounded, _l(s, 'التراجع عن آخر استرجاع', 'Undo last restore'),
+                      _l(s, 'يرجّع بياناتك كما كانت قبل الاسترجاع', 'Brings back your data as it was before the restore'),
+                      () => _undoRestore(context, s)),
+              ],
+            ),
             _expander(
               context,
               s,

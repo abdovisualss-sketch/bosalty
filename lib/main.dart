@@ -265,8 +265,19 @@ class _ShellState extends State<Shell> {
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 1200),
         child: Column(children: [
-          const Header(),
-          if (s.settings['show_prayers'] == true && s.tab != 5) const PrayerBanner(), // tab 5 = Mushaf: full-screen reading
+          // Header: hidden only while the Mushaf tab (5) is in its reading view (full-screen reading).
+          // Prayer bar: not shown on the Radio (3), Adhkar (4) and Mushaf (5) tabs.
+          ValueListenableBuilder<bool>(
+            valueListenable: mushafReading,
+            builder: (context, reading, _) {
+              final hideHeader = s.tab == 5 && reading;
+              final hidePrayers = s.tab == 3 || s.tab == 4 || s.tab == 5; // Radio, Adhkar, Mushaf
+              return Column(mainAxisSize: MainAxisSize.min, children: [
+                if (!hideHeader) const Header(),
+                if (!hidePrayers && s.settings['show_prayers'] == true) const PrayerBanner(),
+              ]);
+            },
+          ),
           Expanded(
             child: IndexedStack(index: s.tab, children: const [
               FocusScreen(),

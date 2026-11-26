@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/gestures.dart';
@@ -7,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'state.dart';
 import 'ui.dart';
+import 'worship_log.dart';
 
 /// المصحف الشريف: Quran text (Hafs, Madani 604 pages) with an index of
 /// surahs / juz / hizb / pages, bookmarks, search and a page-by-page reader.
@@ -89,6 +91,9 @@ class QuranData {
 
   static QuranData? _cache;
 
+  /// The loaded text, or null while it is still loading (the Mushaf screen loads it at start-up).
+  static QuranData? get cached => _cache;
+
   static Future<QuranData> load() async {
     if (_cache != null) return _cache!;
     final q = jsonDecode(await rootBundle.loadString('assets/quran/quran.json')) as Map;
@@ -117,6 +122,68 @@ class QuranData {
   int juzOf(int id) => _countLe(juz, id, 30);
   int hizbQuarterOf(int id) => _countLe(hizbq, id, 240);
   int pageEnd(int pg) => pg >= 604 ? 6236 : page[pg] - 1;
+  int ayatOnPage(int pg) => pageEnd(pg) - page[pg - 1] + 1;
+
+  /// first / last ayah id of juz j (1..30) and of hizb h (1..60 = 4 hizb-quarters each)
+  int juzStart(int j) => juz[j - 1];
+  int juzEnd(int j) => j >= 30 ? 6236 : juz[j] - 1;
+  int hizbStart(int h) => hizbq[(h - 1) * 4];
+  int hizbEnd(int h) => h >= 60 ? 6236 : hizbq[h * 4] - 1;
+}
+
+// ---------------------------------------------------------------- today's reading log
+/// A page counts as "read" only after it has stayed on screen this long (so flipping through pages doesn't count).
+const _readDwell = Duration(seconds: 15);
+
+/// "٨ صفحات" / "8 pages"
+String pagesText(AppState s, int c) {
+  if (!s.rtl) return c == 1 ? '1 page' : '$c pages';
+  if (c == 1) return 'صفحة واحدة';
+  if (c == 2) return 'صفحتان';
+  return c <= 10 ? '${arNum(c)} صفحات' : '${arNum(c)} صفحة';
+}
+
+/// First – last surah of a reading, e.g. "النساء – المائدة" (one name if it stays inside one surah).
+String runSurahs(QuranData q, QuranRun r, bool rtl, {bool full = false}) {
+  String nm(int su) => rtl ? (full ? 'سورة ${q.names[su - 1]}' : q.names[su - 1]) : q.translit[su - 1];
+  final a = q.surahOf(q.page[r.first - 1]), b = q.surahOf(q.pageEnd(r.last));
+  return a == b ? nm(a) : '${nm(a)} – ${nm(b)}';
+}
+
+/// "ص ٩٧–١٠٦" / "p. 97–106"
+String runPages(QuranRun r, bool rtl) {
+  String v(int x) => rtl ? arNum(x) : '$x';
+  final span = r.first == r.last ? v(r.first) : '${v(r.first)}–${v(r.last)}';
+  return rtl ? 'ص $span' : 'p. $span';
+}
+
+/// Everything read on one day, worked out from the list of pages: totals, the readings, the surahs, the juz.
+class QuranDay {
+  QuranDay._(this.runs, this.pages, this.ayat, this.surahAyat, this.juz);
+  final List<QuranRun> runs; // in the order they happened
+  final int pages, ayat;
+  final Map<int, int> surahAyat; // surah no. -> verses on the pages read (in order of first appearance)
+  final List<int> juz; // juz numbers touched, sorted
+
+  static QuranDay of(QuranData q, List<QuranRead> reads) {
+    final ok = [
+      for (final r in reads)
+        if (r.page >= 1 && r.page <= 604) r,
+    ];
+    var ayat = 0;
+    final su = <int, int>{};
+    final jz = <int>{};
+    for (final r in ok) {
+      final from = q.page[r.page - 1], to = q.pageEnd(r.page);
+      ayat += to - from + 1;
+      jz.add(q.juzOf(from));
+      for (var id = from; id <= to; id++) {
+        final k = q.surahOf(id);
+        su[k] = (su[k] ?? 0) + 1;
+      }
+    }
+    return QuranDay._(WorshipLog.runsOf(ok), ok.length, ayat, su, jz.toList()..sort());
+  }
 }
 
 // ---------------------------------------------------------------- screen
@@ -132,6 +199,9 @@ class _MushafScreenState extends State<MushafScreen> {
   String? _error;
 
   bool _reading = false;
+  bool _active = true; // false while another tab is on screen (Mushaf kept alive underneath)
+  bool _wasActive = true;
+  Timer? _dwell; // counts the page as read once it has stayed on screen long enough
   int _page = 1;
   int? _focus; // ayah id to highlight
   /// Reading text size: comes from Settings (so it can be changed there too).
@@ -176,8 +246,45 @@ class _MushafScreenState extends State<MushafScreen> {
     if (mounted) setState(() {});
   }
 
+  /// Hides the app header (logo / tasks chip / tour / settings) while reading.
+  void _syncHeader() {
+    final hide = _reading && _active;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && mushafReading.value != hide) mushafReading.value = hide;
+    });
+  }
+
+  /// The page on screen counts as "read" (and goes to today's log / History) after [_readDwell].
+  void _startDwell() {
+    _dwell?.cancel();
+    if (!_reading || !_active || _q == null) return;
+    final pg = _page;
+    _dwell = Timer(_readDwell, () {
+      if (!mounted || !_reading || !_active || _page != pg) return;
+      final s = AppScope.of(context);
+      if (WorshipLog.addQuranPage(s, pg)) {
+        s.save();
+        setState(() {}); // refresh the bar under the page
+      }
+    });
+  }
+
+  /// Stops counting while another tab is on screen, starts again when the Mushaf comes back.
+  void _syncDwell() {
+    if (_active == _wasActive) return;
+    _wasActive = _active;
+    if (_active) {
+      _startDwell();
+    } else {
+      _dwell?.cancel();
+    }
+  }
+
   @override
   void dispose() {
+    // not while the tree is locked: do it right after this frame
+    WidgetsBinding.instance.addPostFrameCallback((_) => mushafReading.value = false);
+    _dwell?.cancel();
     for (final r in _rec.values) {
       r.dispose();
     }
@@ -198,6 +305,7 @@ class _MushafScreenState extends State<MushafScreen> {
       _reading = true;
     });
     _prefs?.setInt('mushaf_page', pg);
+    _startDwell();
   }
 
   void _saveMarks() =>
@@ -377,6 +485,7 @@ class _MushafScreenState extends State<MushafScreen> {
     });
     _prefs?.setInt('mushaf_page', pg);
     _pc?.jumpToPage(pg - 1);
+    _startDwell();
   }
 
   void _search(String raw) {
@@ -406,6 +515,9 @@ class _MushafScreenState extends State<MushafScreen> {
   Widget build(BuildContext context) {
     final s = AppScope.of(context);
     final p = s.pal;
+    _active = TickerMode.of(context);
+    _syncHeader();
+    _syncDwell();
     if (_error != null) {
       return Center(
         child: Padding(
@@ -831,7 +943,10 @@ class _MushafScreenState extends State<MushafScreen> {
             IconButton(
               tooltip: L('الفهرس', 'Index'),
               icon: Icon(Icons.list_rounded, color: p.accent),
-              onPressed: () => setState(() => _reading = false),
+              onPressed: () {
+                _dwell?.cancel();
+                setState(() => _reading = false);
+              },
             ),
             Expanded(
               child: Column(children: [
@@ -861,23 +976,72 @@ class _MushafScreenState extends State<MushafScreen> {
                 _focus = null;
               });
               _prefs?.setInt('mushaf_page', _page);
+              _startDwell();
             },
             itemBuilder: (c, i) => _pageBody(p, q, i + 1),
           ),
         ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
-          child: Slider(
-            value: _page.toDouble(),
-            min: 1,
-            max: 604,
-            divisions: 603,
-            label: arNum(_page),
-            activeColor: p.accent,
-            onChanged: (v) => _jump(v.round()),
-          ),
-        ),
+        _todayBar(s, p, q),
       ]),
+    );
+  }
+
+  /// The bar under the page: what has been read today (pages, verses, where). Tap it for the full log.
+  Widget _todayBar(AppState s, Pal p, QuranData q) {
+    String L(String ar, String en) => s.rtl ? ar : en;
+    String n(int v) => s.rtl ? arNum(v) : '$v';
+    final day = QuranDay.of(q, WorshipLog.quranOn(s, DateTime.now()));
+    final has = day.pages > 0;
+    final line1 = has
+        ? L('اليوم: ${pagesText(s, day.pages)} · ${n(day.ayat)} آية',
+            'Today: ${pagesText(s, day.pages)} · ${day.ayat} verses')
+        : L('لا توجد قراءة مسجّلة اليوم', 'No reading logged today');
+    final line2 = has
+        ? [for (final r in day.runs) '${runSurahs(q, r, s.rtl)} ${runPages(r, s.rtl)}'].join('  ·  ')
+        : L('تُسجَّل الصفحة بعد ${n(_readDwell.inSeconds)} ثانية من بقائها أمامك',
+            'A page is logged after ${_readDwell.inSeconds} seconds on screen');
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 2, 12, 8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () => _logSheet(q),
+        child: Box(
+          radius: 16,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(children: [
+            Icon(Icons.auto_stories_rounded, color: p.accent, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Txt(line1, size: 13, bold: true, maxLines: 1),
+                const SizedBox(height: 2),
+                Txt(line2, size: 11, color: p.muted, maxLines: 1),
+              ]),
+            ),
+            Icon(Icons.keyboard_arrow_up_rounded, color: p.muted),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  /// The full log of today's reading (opens from the bar). Tapping a reading jumps to its first page.
+  void _logSheet(QuranData q) {
+    final s = AppScope.of(context);
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: s.pal.bg,
+      constraints: const BoxConstraints(maxWidth: 640),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (ctx) => _TodayLogSheet(
+        q: q,
+        onGo: (pg) {
+          Navigator.pop(ctx);
+          _jump(pg);
+        },
+      ),
     );
   }
 
@@ -913,9 +1077,14 @@ class _MushafScreenState extends State<MushafScreen> {
           ),
           child: Column(children: [
             Text('سورة ${q.names[su - 1]}',
-                style: TextStyle(fontFamily: 'AmiriQuran', fontSize: _font + 2, height: 1.6, color: p.accent)),
+                style: TextStyle(
+                    fontFamily: 'Thmanyah',
+                    fontWeight: FontWeight.w700,
+                    fontSize: _font + 2,
+                    height: 1.5,
+                    color: p.accent)),
             Text('${q.meccan[su - 1] ? 'مكية' : 'مدنية'} · ${arNum(q.ayat[su - 1].length)} آية',
-                style: TextStyle(fontSize: 11, color: p.muted)),
+                style: TextStyle(fontFamily: 'Thmanyah', fontSize: 12, color: p.muted)),
           ]),
         ));
         if (su != 1 && su != 9) {
@@ -951,6 +1120,185 @@ class _MushafScreenState extends State<MushafScreen> {
         const SizedBox(height: 8),
         Center(child: Text(arNum(pg), style: TextStyle(color: p.muted, fontSize: 13))),
       ],
+    );
+  }
+}
+
+
+// ---------------------------------------------------------------- today's reading log (full view)
+/// Opens from the bar under the page: totals, every reading of the day (newest first), the surahs and the juz.
+class _TodayLogSheet extends StatelessWidget {
+  const _TodayLogSheet({required this.q, required this.onGo});
+  final QuranData q;
+  final void Function(int page) onGo;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = AppScope.of(context);
+    final p = s.pal;
+    String L(String ar, String en) => s.rtl ? ar : en;
+    String n(int v) => s.rtl ? arNum(v) : '$v';
+    String clock(int m) => '${(m ~/ 60).toString().padLeft(2, '0')}:${(m % 60).toString().padLeft(2, '0')}';
+    final today = dateOnly(DateTime.now());
+    final d = QuranDay.of(q, WorshipLog.quranOn(s, today));
+
+    Widget section(String text) => Padding(
+          padding: const EdgeInsets.fromLTRB(4, 18, 4, 8),
+          child: Txt(text, size: 14, bold: true, color: p.accent),
+        );
+
+    Widget tile(String value, String label) => Expanded(
+          child: Box(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+            child: Column(children: [
+              Txt(value, size: 20, bold: true, head: true),
+              const SizedBox(height: 2),
+              Txt(label, size: 11, color: p.muted, maxLines: 1),
+            ]),
+          ),
+        );
+
+    Widget runCard(QuranRun r) {
+      var ayat = 0;
+      for (var pg = r.first; pg <= r.last; pg++) {
+        ayat += q.ayatOnPage(pg);
+      }
+      final time = r.startMin == r.endMin ? clock(r.startMin) : '${clock(r.startMin)} – ${clock(r.endMin)}';
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(16),
+          onTap: () => onGo(r.first),
+          child: Box(
+            radius: 16,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(children: [
+              Container(
+                width: 38,
+                height: 38,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(color: p.sel, shape: BoxShape.circle),
+                child: Icon(Icons.auto_stories_rounded, color: p.accent, size: 19),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Txt(runSurahs(q, r, s.rtl, full: true), size: 14, bold: true, maxLines: 2),
+                  const SizedBox(height: 2),
+                  Txt(
+                    '${runPages(r, s.rtl)} · ${pagesText(s, r.pages)} · ${L('${arNum(ayat)} آية', '$ayat verses')}',
+                    size: 12,
+                    color: p.muted,
+                    maxLines: 2,
+                  ),
+                ]),
+              ),
+              const SizedBox(width: 8),
+              Txt(time, size: 12, color: p.muted),
+            ]),
+          ),
+        ),
+      );
+    }
+
+    Widget surahRow(int su, int cnt) {
+      final total = q.ayat[su - 1].length;
+      final f = (cnt / total).clamp(0.0, 1.0).toDouble();
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Box(
+          radius: 14,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Row(children: [
+              Expanded(child: Txt(L('سورة ${q.names[su - 1]}', q.translit[su - 1]), size: 13, bold: true, maxLines: 1)),
+              Txt(L('${arNum(cnt)} من ${arNum(total)} آية', '$cnt of $total verses'), size: 12, color: p.muted),
+            ]),
+            const SizedBox(height: 6),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(5),
+              child: LinearProgressIndicator(
+                value: f,
+                minHeight: 5,
+                backgroundColor: p.card2,
+                valueColor: AlwaysStoppedAnimation<Color>(p.accent),
+              ),
+            ),
+          ]),
+        ),
+      );
+    }
+
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.7,
+      minChildSize: 0.4,
+      maxChildSize: 0.95,
+      builder: (ctx, scroll) => ListView(
+        controller: scroll,
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+        children: [
+          Center(
+            child: Container(
+              width: 44,
+              height: 4,
+              decoration: BoxDecoration(color: p.muted.withOpacity(0.4), borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(children: [
+            const SizedBox(width: 6),
+            Expanded(child: Txt(L('سجل قراءة اليوم', "Today's reading log"), size: 20, bold: true, head: true)),
+            IconButton(onPressed: () => Navigator.of(context).pop(), icon: Icon(Icons.close_rounded, color: p.muted)),
+          ]),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(6, 0, 6, 8),
+            child: Txt(s.dateLabel(today), size: 12, color: p.muted),
+          ),
+          if (d.pages == 0)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 12),
+              child: Txt(
+                L('لم تُسجَّل أي صفحة اليوم بعد.\nكل صفحة تبقى أمامك ${arNum(_readDwell.inSeconds)} ثانية تُحسب مقروءة وتظهر هنا وفي السجل.',
+                    'No pages logged today yet.\nEvery page that stays on screen for ${_readDwell.inSeconds} seconds counts as read and shows up here and in History.'),
+                size: 13,
+                color: p.muted,
+                align: TextAlign.center,
+              ),
+            )
+          else ...[
+            Row(children: [
+              tile(n(d.pages), L('صفحة', 'pages')),
+              const SizedBox(width: 8),
+              tile(n(d.ayat), L('آية', 'verses')),
+              const SizedBox(width: 8),
+              tile(n(d.runs.length), d.runs.length == 1 ? L('قراءة', 'reading') : L('قراءات', 'readings')),
+            ]),
+            section(L('القراءات (الأحدث أولًا)', 'Readings (newest first)')),
+            for (final r in d.runs.reversed) runCard(r),
+            section(L('السور', 'Surahs')),
+            for (final e in d.surahAyat.entries) surahRow(e.key, e.value),
+            section(L('الأجزاء', 'Juz')),
+            Wrap(spacing: 8, runSpacing: 8, children: [
+              for (final j in d.juz)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                  decoration: BoxDecoration(color: p.sel, borderRadius: BorderRadius.circular(12)),
+                  child: Txt(L('الجزء ${arNum(j)}', 'Juz $j'), size: 12, bold: true, color: p.accent),
+                ),
+            ]),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(6, 18, 6, 0),
+              child: Txt(
+                L('الصفحة تُحسب مقروءة بعد ${arNum(_readDwell.inSeconds)} ثانية أمامك، وتُحسب مرة واحدة في اليوم. اضغط على أي قراءة للانتقال إليها.',
+                    'A page counts as read after ${_readDwell.inSeconds} seconds on screen, once a day. Tap a reading to jump to it.'),
+                size: 11,
+                color: p.muted,
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }
