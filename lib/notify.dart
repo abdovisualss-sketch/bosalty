@@ -150,11 +150,14 @@ class Notify {
     } catch (_) {}
   }
 
-  // ---------------------------------------------------------------- prayer reminders
+  // ---------------------------------------------------------------- prayer + adhkar reminders
 
   // Prayer reminders use their own id range (7100..7159) so they never clash with the timer notification (7001).
+  // Adhkar reminders use 7200..7229.
   static const _prayerBase = 7100;
   static const _prayerSlots = 60;
+  static const _adhkarBase = 7200;
+  static const _adhkarSlots = 30;
 
   static const _prayerDetails = NotificationDetails(
     android: AndroidNotificationDetails(
@@ -169,38 +172,63 @@ class Notify {
     iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true),
   );
 
-  /// Replaces every scheduled prayer reminder with [items] (only the ones still in the future).
-  static Future<void> schedulePrayers(List<PrayerAlert> items) async {
+  static const _adhkarDetails = NotificationDetails(
+    android: AndroidNotificationDetails(
+      'adhkar_reminder',
+      'Adhkar reminders',
+      channelDescription: 'Morning and evening adhkar reminders',
+      importance: Importance.high,
+      priority: Priority.high,
+      playSound: true,
+      category: AndroidNotificationCategory.reminder,
+    ),
+    iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true),
+  );
+
+  /// Replaces every notification of one id range with [items] (only the ones still in the future).
+  static Future<void> _replaceAll(int base, int slots, NotificationDetails details, List<PrayerAlert> items) async {
     if (!_supported) return;
     try {
       await init();
-      for (var i = 0; i < _prayerSlots; i++) {
-        await _plugin.cancel(_prayerBase + i);
+      for (var i = 0; i < slots; i++) {
+        await _plugin.cancel(base + i);
       }
       final now = DateTime.now();
       var slot = 0;
       for (final a in items) {
         if (!a.at.isAfter(now)) continue;
-        if (slot >= _prayerSlots) break;
-        final id = _prayerBase + slot++;
+        if (slot >= slots) break;
+        final id = base + slot++;
         final when = tz.TZDateTime.from(a.at, tz.UTC);
         try {
-          await _plugin.zonedSchedule(id, a.title, a.body, when, _prayerDetails,
+          await _plugin.zonedSchedule(id, a.title, a.body, when, details,
               androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle);
         } catch (_) {
-          await _plugin.zonedSchedule(id, a.title, a.body, when, _prayerDetails,
+          await _plugin.zonedSchedule(id, a.title, a.body, when, details,
               androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle);
         }
       }
     } catch (_) {}
   }
 
-  static Future<void> clearPrayers() async {
+  static Future<void> _clearAll(int base, int slots) async {
     if (!_supported) return;
     try {
-      for (var i = 0; i < _prayerSlots; i++) {
-        await _plugin.cancel(_prayerBase + i);
+      for (var i = 0; i < slots; i++) {
+        await _plugin.cancel(base + i);
       }
     } catch (_) {}
   }
+
+  /// Replaces every scheduled prayer reminder with [items].
+  static Future<void> schedulePrayers(List<PrayerAlert> items) =>
+      _replaceAll(_prayerBase, _prayerSlots, _prayerDetails, items);
+
+  static Future<void> clearPrayers() => _clearAll(_prayerBase, _prayerSlots);
+
+  /// Replaces every scheduled morning / evening adhkar reminder with [items].
+  static Future<void> scheduleAdhkar(List<PrayerAlert> items) =>
+      _replaceAll(_adhkarBase, _adhkarSlots, _adhkarDetails, items);
+
+  static Future<void> clearAdhkar() => _clearAll(_adhkarBase, _adhkarSlots);
 }

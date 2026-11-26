@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import 'mushaf.dart';
 import 'state.dart';
+import 'strings.dart';
 import 'ui.dart';
 import 'worship_log.dart';
 
@@ -80,6 +81,8 @@ class HistoryScreen extends StatelessWidget {
       children: [
         StatsGrid(stats: stats),
         const SizedBox(height: 12),
+        const StreakCard(),
+        const SizedBox(height: 12),
         Row(children: [
           Txt(s.t('show'), size: 13, sec: 'history', color: p.muted),
           const SizedBox(width: 10),
@@ -98,6 +101,140 @@ class HistoryScreen extends StatelessWidget {
         else
           ...rows,
       ],
+    );
+  }
+}
+
+/// Days in a row + the last 7 days at a glance (focus minutes, adhkar lists finished, Quran pages).
+/// A day counts when it has a focus session, a finished adhkar list or a Quran page.
+class StreakCard extends StatelessWidget {
+  const StreakCard({super.key});
+
+  static const _fire = Color(0xFFF97316);
+
+  Widget _mini(AppState s, IconData icon, String value, String label) {
+    final p = s.pal;
+    return Expanded(
+      child: Column(children: [
+        Icon(icon, size: 18, color: p.accent),
+        const SizedBox(height: 4),
+        FittedBox(fit: BoxFit.scaleDown, child: Txt(value, size: 14, bold: true, sec: 'history')),
+        Txt(label, size: 11, sec: 'history', color: p.muted, maxLines: 1),
+      ]),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = AppScope.of(context);
+    final p = s.pal;
+    final today = dateOnly(DateTime.now());
+    final days = WorshipLog.activeDays(s);
+    final streak = WorshipLog.streakNow(days, today);
+    final best = WorshipLog.streakBest(days);
+    final week = [for (var i = 6; i >= 0; i--) DateTime(today.year, today.month, today.day - i)];
+
+    final mins = <DateTime, int>{};
+    for (final x in s.sessions) {
+      final d = DateTime.tryParse('${x['when'] ?? ''}');
+      if (d == null) continue;
+      final k = dateOnly(d);
+      mins[k] = (mins[k] ?? 0) + (((x['minutes'] as num?) ?? 0).toInt());
+    }
+    var focus = 0, lists = 0, pages = 0;
+    for (final d in week) {
+      focus += mins[d] ?? 0;
+      pages += WorshipLog.quranOn(s, d).length;
+    }
+    for (final e in WorshipLog.adhkarEntries(s)) {
+      final d = DateTime.tryParse('${e['when'] ?? ''}');
+      if (d != null && week.contains(dateOnly(d))) lists++;
+    }
+
+    final arDays = const ['ن', 'ث', 'ر', 'خ', 'ج', 'س', 'ح'];
+    String dayLabel(DateTime d) => s.rtl ? arDays[d.weekday - 1] : kWeekdays['en']![d.weekday - 1];
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+      decoration: BoxDecoration(
+        color: p.card,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: p.muted.withOpacity(0.12)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(color: streak > 0 ? _fire.withOpacity(0.15) : p.sel, shape: BoxShape.circle),
+            child: Icon(Icons.local_fire_department_rounded, color: streak > 0 ? _fire : p.muted, size: 24),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: streak > 0
+                ? Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                      Txt('$streak', size: 24, bold: true, sec: 'history'),
+                      const SizedBox(width: 6),
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 3),
+                        child: Txt(s.rtl ? 'يوم متتالي' : 'day streak', size: 13, sec: 'history', color: p.muted),
+                      ),
+                    ]),
+                    Txt(s.rtl ? 'أفضل سلسلة: $best' : 'Best: $best', size: 12, sec: 'history', color: p.muted),
+                  ])
+                : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Txt(s.rtl ? 'ابدأ سلسلتك النهاردة' : 'Start your streak today', size: 15, bold: true, sec: 'history'),
+                    Txt(
+                      s.rtl ? 'جلسة تركيز أو أذكار أو صفحة قرآن تكفي' : 'A focus session, adhkar or a Quran page is enough',
+                      size: 12,
+                      sec: 'history',
+                      color: p.muted,
+                    ),
+                  ]),
+          ),
+        ]),
+        const SizedBox(height: 14),
+        Row(children: [
+          for (final d in week)
+            Expanded(
+              child: Column(children: [
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Txt(dayLabel(d), size: 11, sec: 'history', color: d == today ? p.accent : p.muted, bold: d == today),
+                ),
+                const SizedBox(height: 6),
+                Container(
+                  width: 26,
+                  height: 26,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: days.contains(d) ? p.accent : p.card2,
+                    border: d == today && !days.contains(d) ? Border.all(color: p.accent, width: 1.5) : null,
+                  ),
+                  child: days.contains(d) ? const Icon(Icons.check_rounded, size: 16, color: Colors.white) : null,
+                ),
+                const SizedBox(height: 4),
+                SizedBox(
+                  height: 14,
+                  child: (mins[d] ?? 0) > 0
+                      ? FittedBox(fit: BoxFit.scaleDown, child: Txt('${mins[d]}${s.t('m')}', size: 10, sec: 'history', color: p.muted))
+                      : null,
+                ),
+              ]),
+            ),
+        ]),
+        const SizedBox(height: 10),
+        Divider(height: 1, thickness: 1, color: p.muted.withOpacity(0.12)),
+        const SizedBox(height: 10),
+        Row(children: [
+          _mini(s, Icons.timer_rounded, s.fmtMin(focus), s.rtl ? 'تركيز' : 'Focus'),
+          _mini(s, Icons.wb_twilight_rounded, '$lists', s.rtl ? 'أذكار' : 'Adhkar'),
+          _mini(s, Icons.menu_book_rounded, '$pages', s.rtl ? 'صفحات' : 'Pages'),
+        ]),
+        const SizedBox(height: 4),
+        Center(child: Txt(s.rtl ? 'آخر ٧ أيام' : 'Last 7 days', size: 11, sec: 'history', color: p.muted)),
+      ]),
     );
   }
 }

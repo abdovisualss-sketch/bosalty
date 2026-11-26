@@ -142,6 +142,52 @@ class WorshipLog {
     }
     return runs;
   }
+
+  // ---------------------------------------------------------------- streaks
+
+  /// Every day with some activity: a focus session, a finished adhkar list, or a Quran page read.
+  static Set<DateTime> activeDays(AppState s) {
+    final out = <DateTime>{};
+    for (final x in s.sessions) {
+      final d = DateTime.tryParse('${x['when'] ?? ''}');
+      if (d != null && ((x['minutes'] as num?) ?? 0) > 0) out.add(dateOnly(d));
+    }
+    for (final e in adhkarEntries(s)) {
+      final d = DateTime.tryParse('${e['when'] ?? ''}');
+      if (d != null) out.add(dateOnly(d));
+    }
+    for (final k in quranDays(s)) {
+      final d = DateTime.tryParse(k);
+      if (d != null && quranOn(s, d).isNotEmpty) out.add(dateOnly(d));
+    }
+    return out;
+  }
+
+  static DateTime _dayBefore(DateTime d) => DateTime(d.year, d.month, d.day - 1);
+
+  /// Days in a row up to today. If today has nothing yet, yesterday still counts (the day is not over).
+  static int streakNow(Set<DateTime> days, DateTime today) {
+    var d = days.contains(today) ? today : _dayBefore(today);
+    var n = 0;
+    while (days.contains(d)) {
+      n++;
+      d = _dayBefore(d);
+    }
+    return n;
+  }
+
+  /// The longest run of days in a row, ever.
+  static int streakBest(Set<DateTime> days) {
+    final l = days.toList()..sort();
+    var best = 0, run = 0;
+    DateTime? prev;
+    for (final d in l) {
+      run = (prev != null && DateTime(prev.year, prev.month, prev.day + 1) == d) ? run + 1 : 1;
+      if (run > best) best = run;
+      prev = d;
+    }
+    return best;
+  }
 }
 
 /// One page that counted as read, and the minute of the day it was counted.

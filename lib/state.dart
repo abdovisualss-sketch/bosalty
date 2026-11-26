@@ -9,8 +9,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:convert';
 import 'notify.dart';
+import 'prayer.dart';
 import 'sounds.dart';
 import 'strings.dart';
+import 'worship_log.dart';
+
+// prayerTimes() / PrayerConfig now live in prayer.dart; other files keep importing them from here.
+export 'prayer.dart';
 
 // ---------------- constants ----------------
 const projects = ['Dlight', 'Umami', 'Graduation Project', 'Learning', 'Freelance'];
@@ -111,49 +116,18 @@ DateTime? parseDate(String? raw) {
   }
 }
 
-DateTime _lastWeekday(int y, int m, int wd /* Mon=0 */) {
-  final end = (m < 12 ? DateTime(y, m + 1, 1) : DateTime(y + 1, 1, 1)).subtract(const Duration(days: 1));
-  return end.subtract(Duration(days: ((end.weekday - 1) - wd) % 7));
-}
-
-/// Prayer times for Cairo in hours (same algorithm as the Python app).
-Map<String, double> prayerTimes(DateTime d) {
-  const lat = 30.0444, lng = 31.2357;
-  final tz = (!d.isBefore(_lastWeekday(d.year, 4, 4)) && !d.isAfter(_lastWeekday(d.year, 10, 3))) ? 3 : 2;
-  final epochDays = DateTime.utc(d.year, d.month, d.day).millisecondsSinceEpoch / 86400000.0;
-  final dd = epochDays + 2440587.5 + 0.5 - lng / 360 - 2451545.0;
-  double rad(double x) => x * math.pi / 180;
-  double deg(double x) => x * 180 / math.pi;
-  final g = rad((357.529 + 0.98560028 * dd) % 360);
-  final q = (280.459 + 0.98564736 * dd) % 360;
-  final L = rad((q + 1.915 * math.sin(g) + 0.020 * math.sin(2 * g)) % 360);
-  final e = rad(23.439 - 0.00000036 * dd);
-  final ra = (deg(math.atan2(math.cos(e) * math.sin(L), math.cos(L))) / 15) % 24;
-  final decl = math.asin(math.sin(e) * math.sin(L));
-  final eqt = ((q / 15 - ra + 12) % 24) - 12;
-  final noon = 12 + tz - lng / 15 - eqt;
-  final la = rad(lat);
-  double t(double a) {
-    final x = (-math.sin(rad(a)) - math.sin(decl) * math.sin(la)) / (math.cos(decl) * math.cos(la));
-    return deg(math.acos(x.clamp(-1.0, 1.0))) / 15;
-  }
-
-  final asrA = -deg(math.atan(1 / (1 + math.tan((la - decl).abs()))));
-  return {
-    'fajr': noon - t(19.5), 'dhuhr': noon, 'asr': noon + t(asrA),
-    'maghrib': noon + t(0.833), 'isha': noon + t(17.5),
-  };
-}
-
 // ---------------- settings defaults ----------------
 Map<String, dynamic> defaultSettings() => {
-      'lang': 'en', 'theme': 'light', 'accent': 'red',
+      'lang': 'ar', 'theme': 'dark', 'accent': 'red',
       'font_global': 1.0, 'font_header': 1.0, 'font_tasks': 1.0,
       'font_timer': 1.0, 'font_history': 1.0, 'font_goals': 1.0,
       'compact_tasks': false, 'show_tiles': true, 'default_all_days': false,
       'presets': [15, 25, 45, 60],
       'show_prayers': true, 'sound': true, 'notify': true,
       'prayer_alerts': true,
+      'city': 'cairo', // prayer-times city (id from prayer.dart, or 'custom' with city_lat / city_lng)
+      'adhkar_morning_alert': false,
+      'adhkar_evening_alert': false,
       'timer_sound': 'chime',
       'mushaf_font': 28.0,
     };
@@ -211,6 +185,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     } catch (_) {}
     _normalize(base);
     data = base;
+    _applyCity();
+    _lastSynced = _prefs?.getString(_syncedKey) ?? '';
+    _resetSigs();
     _fixProjectRefs();
     allDays = settings['default_all_days'] == true;
     final p = presets;
@@ -284,6 +261,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
       if (keepSafety) _prefs?.setString(_safetyKey, jsonEncode(data));
       data = base;
+      _applyCity();
+      // (the item signatures are NOT reset here: save() below then stamps what the restore changed and
+      //  records what it removed, so the restore also wins against the cloud copy)
       selectedId = null;
       _fixProjectRefs();
       allDays = settings['default_all_days'] == true;
@@ -333,6 +313,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void save() {
+    _stampItems();
     data['_updated'] = _nowStamp();
     _prefs?.setString('bosalty_data', jsonEncode(data));
     _schedulePush();
@@ -344,9 +325,168 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   String _lastSyncErr = '';
   bool _syncOkShown = false;
 
+  // ---- merge bookkeeping ----
+  // Every task / goal / session / adhkar entry carries `_u` (when it was last changed). Deleted ones are
+  // remembered in data['_deleted'] (id -> when). When two devices both changed something, the two copies are
+  // combined item by item (newest edit wins) instead of the newer file replacing the other one.
+  static const _syncedKey = 'bosalty_last_synced';
+  static const _mergeLists = ['tasks', 'goals', 'sessions', 'adhkar_log'];
+  final Map<String, String> _sigs = {};
+  String _lastSynced = ''; // stamp of the data at the last successful sync (upload or download)
+  String _remoteSeen = ''; // stamp of the cloud copy as we last saw it
+  static final _epoch = DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+
+  bool _after(String a, String b) => (DateTime.tryParse(a) ?? _epoch).isAfter(DateTime.tryParse(b) ?? _epoch);
+
+  String _sigOf(Map e) {
+    final m = Map<String, dynamic>.from(e)..remove('_u');
+    return jsonEncode(m);
+  }
+
+  /// Remember how every item looks right now (call after the data was replaced by a load / download / merge).
+  void _resetSigs() {
+    _sigs.clear();
+    for (final k in _mergeLists) {
+      final l = data[k];
+      if (l is! List) continue;
+      for (final e in l) {
+        if (e is Map && e['id'] != null) _sigs['$k:${e['id']}'] = _sigOf(e);
+      }
+    }
+  }
+
+  Map<String, dynamic> _tombs() {
+    final cur = data['_deleted'];
+    if (cur is Map<String, dynamic>) return cur;
+    final m = cur is Map ? Map<String, dynamic>.from(cur) : <String, dynamic>{};
+    data['_deleted'] = m;
+    return m;
+  }
+
+  /// Called by save(): stamps the items that changed since last time and records the ones that were removed.
+  void _stampItems() {
+    final now = _nowStamp();
+    final seen = <String>{};
+    for (final k in _mergeLists) {
+      final l = data[k];
+      if (l is! List) continue;
+      for (final e in l) {
+        if (e is! Map || e['id'] == null) continue;
+        final key = '$k:${e['id']}';
+        seen.add(key);
+        final sig = _sigOf(e);
+        if (_sigs[key] != sig) {
+          e['_u'] = now;
+          _sigs[key] = sig;
+        }
+      }
+    }
+    final gone = [for (final key in _sigs.keys) if (!seen.contains(key)) key];
+    if (gone.isNotEmpty) {
+      final del = _tombs();
+      for (final key in gone) {
+        _sigs.remove(key);
+        del[key.substring(key.indexOf(':') + 1)] = now;
+      }
+    }
+  }
+
+  List<Map<String, dynamic>> _maps(Object? l) =>
+      l is List ? [for (final e in l) if (e is Map) Map<String, dynamic>.from(e)] : <Map<String, dynamic>>[];
+
+  /// Combines this device's data with the cloud copy. Settings stay this device's own.
+  Map<String, dynamic> _mergeData(Map<String, dynamic> local, Map<String, dynamic> remote) {
+    final localNewer = !_after('${remote['_updated']}', '${local['_updated']}');
+    final first = localNewer ? local : remote;
+    final second = localNewer ? remote : local;
+    final out = <String, dynamic>{...second, ...first}; // plain values (profile, project list...): newest copy wins
+    out['settings'] = local['settings'] ?? remote['settings'];
+
+    final tomb = <String, String>{};
+    for (final src in [remote['_deleted'], local['_deleted']]) {
+      if (src is! Map) continue;
+      src.forEach((k, v) {
+        final cur = tomb['$k'];
+        if (cur == null || _after('$v', cur)) tomb['$k'] = '$v';
+      });
+    }
+
+    for (final k in _mergeLists) {
+      if (local[k] == null && remote[k] == null) continue;
+      final byId = <String, Map<String, dynamic>>{};
+      final noId = <Map<String, dynamic>>[];
+      for (var side = 0; side < 2; side++) {
+        for (final e in _maps(side == 0 ? first[k] : second[k])) {
+          if (e['id'] == null) {
+            if (side == 0) noId.add(e);
+            continue;
+          }
+          final id = '${e['id']}';
+          final cur = byId[id];
+          if (cur == null || _after('${e['_u'] ?? ''}', '${cur['_u'] ?? ''}')) byId[id] = e;
+        }
+      }
+      final merged = <dynamic>[...noId];
+      byId.forEach((id, e) {
+        final d = tomb[id];
+        if (d != null && !_after('${e['_u'] ?? ''}', d)) return; // deleted after its last edit
+        merged.add(e);
+      });
+      out[k] = merged;
+    }
+
+    // Quran pages read: a page counts once a day, so just join both sides.
+    if (local['quran_log'] is Map || remote['quran_log'] is Map) {
+      final q = <String, dynamic>{};
+      for (final src in [remote['quran_log'], local['quran_log']]) {
+        if (src is! Map) continue;
+        src.forEach((day, list) {
+          if (list is! List) return;
+          final cur = q.putIfAbsent('$day', () => <dynamic>[]) as List;
+          for (final e in list) {
+            if (e is! List || e.length < 2) continue;
+            if (!cur.any((c) => c is List && c.isNotEmpty && c[0] == e[0])) cur.add(e);
+          }
+        });
+      }
+      num minuteOf(Object? e) => e is List && e.length > 1 ? (num.tryParse('${e[1]}') ?? 0) : 0;
+      for (final v in q.values) {
+        (v as List).sort((a, b) => minuteOf(a).compareTo(minuteOf(b)));
+      }
+      out['quran_log'] = q;
+    }
+
+    final cutoff = DateTime.now().toUtc().subtract(const Duration(days: 60));
+    tomb.removeWhere((_, v) => (DateTime.tryParse(v) ?? _epoch).isBefore(cutoff));
+    out['_deleted'] = tomb;
+    out['_updated'] = _nowStamp();
+    return out;
+  }
+
+  /// Both this device and the cloud changed since the last sync: download the cloud copy and combine.
+  /// (The caller uploads the result.)
+  Future<void> _mergeFromCloud(SupabaseClient c, String uid) async {
+    final rows = await c.from('app_data').select('data').eq('user_id', uid).limit(1);
+    if (rows.isEmpty) return;
+    final remote = Map<String, dynamic>.from(rows.first['data'] as Map);
+    final base = defaultData();
+    base.addAll(_mergeData(data, remote));
+    _normalize(base);
+    data = base;
+    _resetSigs();
+    _remoteSeen = '${remote['_updated'] ?? ''}';
+    _lastSynced = _remoteSeen;
+    _prefs?.setString('bosalty_data', jsonEncode(data));
+    if (selectedId != null && findTask(selectedId!) == null) selectedId = null;
+    _fixProjectRefs();
+    notifyListeners();
+    toast(rtl ? 'تم دمج التعديلات من أجهزتك ✓' : 'Merged the changes from your devices ✓');
+  }
+
   void _syncFail(Object e) {
     final m = '$e'.replaceAll('\n', ' ');
-    final msg = 'Sync error: ${m.length > 150 ? m.substring(0, 150) : m}';
+    final detail = m.length > 150 ? m.substring(0, 150) : m;
+    final msg = rtl ? 'خطأ في المزامنة: $detail' : 'Sync error: $detail';
     if (msg != _lastSyncErr) {
       _lastSyncErr = msg;
       toast(msg);
@@ -357,7 +497,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     if (_lastSyncErr.isNotEmpty || !_syncOkShown) {
       _lastSyncErr = '';
       _syncOkShown = true;
-      toast('Cloud sync is working');
+      toast(rtl ? 'المزامنة السحابية شغّالة' : 'Cloud sync is working');
     }
   }
 
@@ -368,9 +508,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     s = dot == -1 ? '$s.000000' : s.padRight(dot + 7, '0');
     return '$s+00:00';
   }
-
-  DateTime _stampOf(Map m) =>
-      DateTime.tryParse('${m['_updated'] ?? ''}') ?? DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
 
   User? get _user {
     try {
@@ -395,11 +532,23 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     if (uid == null || !_pushPending) return;
     _pushPending = false;
     try {
+      // Did another device upload since we last looked? Then combine first, so nothing it did is overwritten.
+      final head = await c.from('app_data').select('stamp:data->>_updated').eq('user_id', uid).limit(1);
+      if (head.isNotEmpty) {
+        final rs = '${head.first['stamp'] ?? ''}';
+        if (rs.isNotEmpty && rs != _remoteSeen && _after(rs, _lastSynced)) {
+          await _mergeFromCloud(c, uid);
+        }
+      }
+      final stamp = '${data['_updated']}';
       await c.from('app_data').upsert({
         'user_id': uid,
         'data': data,
         'updated_at': DateTime.now().toUtc().toIso8601String(),
       }, onConflict: 'user_id');
+      _lastSynced = stamp;
+      _remoteSeen = stamp;
+      _prefs?.setString(_syncedKey, stamp);
       _syncOk();
     } catch (e) {
       _pushPending = true; // try again on the next save / resume
@@ -453,7 +602,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     if (_pushPending) {
-      await pushNow(); // an earlier upload failed: retry it first
+      await pushNow(); // an earlier upload failed (or is waiting): do it first
       return;
     }
     _pulling = true;
@@ -464,31 +613,42 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       if (head.isEmpty) {
         _pushPending = true; // nothing in the cloud yet: upload this device's data
         await pushNow();
-        toast('Cloud was empty: uploaded ${tasks.length} tasks');
+        toast(rtl ? 'السحابة كانت فاضية: اترفعت ${tasks.length} مهمة' : 'Cloud was empty: uploaded ${tasks.length} tasks');
         return;
       }
-      final r = DateTime.tryParse('${head.first['stamp'] ?? ''}') ??
-          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
-      final l = _stampOf(data);
-      if (r.isAfter(l)) {
-        // 2) the cloud copy is newer: download it
+      final rs = '${head.first['stamp'] ?? ''}';
+      _remoteSeen = rs;
+      // What changed since the last time both sides were the same?
+      final remoteChanged = _after(rs, _lastSynced);
+      final localChanged = _after('${data['_updated'] ?? ''}', _lastSynced);
+      if (remoteChanged && localChanged) {
+        // 2a) both changed: combine them, then upload the result
+        await _mergeFromCloud(c, uid);
+        _pushPending = true;
+        await pushNow();
+      } else if (remoteChanged) {
+        // 2b) only the cloud changed: download it
         final rows = await c.from('app_data').select('data').eq('user_id', uid).limit(1);
         if (rows.isEmpty) return;
         final remote = Map<String, dynamic>.from(rows.first['data'] as Map);
         final base = defaultData();
         base.addAll(remote);
-        base['settings'] = settings; // theme / language / layout stay per device
+        base['settings'] = settings; // theme / language / layout / city stay per device
         _normalize(base);
         data = base;
+        _resetSigs();
+        _lastSynced = rs;
+        _prefs?.setString(_syncedKey, rs);
         _prefs?.setString('bosalty_data', jsonEncode(data));
         if (selectedId != null && findTask(selectedId!) == null) selectedId = null;
         _fixProjectRefs();
         notifyListeners();
-        toast('Loaded ${tasks.length} tasks from the cloud');
-      } else if (l.isAfter(r)) {
+        toast(rtl ? 'تم تحميل ${tasks.length} مهمة من السحابة' : 'Loaded ${tasks.length} tasks from the cloud');
+      } else if (localChanged) {
+        // 2c) only this device changed: upload
         _pushPending = true;
         await pushNow();
-        toast('Phone data is newer: uploaded ${tasks.length} tasks');
+        toast(rtl ? 'بيانات هذا الجهاز أحدث: اترفعت ${tasks.length} مهمة' : 'This device is newer: uploaded ${tasks.length} tasks');
       }
     } catch (e) {
       _syncFail(e);
@@ -787,8 +947,23 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       return false;
     }
     settings[key] = value;
+    if (key == 'city' || key == 'city_lat' || key == 'city_lng') _applyCity();
     _commitLocal();
     return true;
+  }
+
+  // ---------------- prayer-times city ----------------
+  void _applyCity() => PrayerConfig.apply(settings['city'] as String?, settings['city_lat'] as num?, settings['city_lng'] as num?);
+
+  /// "Cairo · Egyptian Authority" (shown in Settings).
+  String get cityLabel => '${rtl ? PrayerConfig.city.ar : PrayerConfig.city.en} · ${PrayerConfig.methodLabel(rtl)}';
+
+  void setCity(String id) => setSetting('city', id);
+
+  void setCustomCity(double lat, double lng) {
+    settings['city_lat'] = lat;
+    settings['city_lng'] = lng;
+    setSetting('city', PrayerConfig.customId);
   }
 
   /// The chosen end-of-session tone (falls back to the default if the saved id is unknown).
@@ -812,6 +987,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     data['settings'] = defaultSettings();
+    _applyCity();
     allDays = false;
     _commitLocal();
   }
@@ -1108,17 +1284,21 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     await TimerSounds.play(timerSoundId);
   }
 
-  // --- prayer reminders (system notifications on Android / iOS) ---
-  String _prayerSig = '';
+  // --- prayer + adhkar reminders (system notifications on Android / iOS) ---
+  String _prayerSig = '', _adhkarSig = '';
 
-  /// Keeps the phone's scheduled prayer notifications in step with the settings.
-  /// Safe to call very often: it only reschedules when the day, the language
-  /// or the on/off setting changed.
+  /// Keeps the phone's scheduled notifications in step with the settings. Safe to call very often:
+  /// it only reschedules when the day, the language, the city or an on/off setting changed.
   void syncPrayerAlerts() {
     if (!Notify.supported) return;
+    _syncPrayers();
+    _syncAdhkarAlerts();
+  }
+
+  void _syncPrayers() {
     final on = settings['prayer_alerts'] == true;
-    final today = dateOnly(DateTime.now());
-    final sig = on ? '${iso(today)}|$lang' : 'off';
+    final today = dateOnly(PrayerConfig.now());
+    final sig = on ? '${iso(today)}|$lang|${PrayerConfig.sig}' : 'off';
     if (sig == _prayerSig) return;
     _prayerSig = sig;
     if (!on) {
@@ -1130,12 +1310,52 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       final date = DateTime(today.year, today.month, today.day + i);
       final times = prayerTimes(date);
       for (final k in prayers) {
-        final mins = (times[k]! * 60).round();
-        final at = DateTime(date.year, date.month, date.day, mins ~/ 60, mins % 60);
-        items.add(PrayerAlert(at, t('pray_title', {'p': t(k)}), t('pray_body')));
+        items.add(PrayerAlert(PrayerConfig.instant(date, times[k]!), t('pray_title', {'p': t(k)}), t('pray_body')));
       }
     }
     Notify.schedulePrayers(items);
+  }
+
+  /// true if the morning / evening adhkar list ('morning' | 'evening') was already finished today.
+  bool adhkarDoneToday(String kind) {
+    final day = iso(DateTime.now());
+    for (final e in WorshipLog.adhkarEntries(this)) {
+      if (e['kind'] == kind && '${e['when']}'.startsWith(day)) return true;
+    }
+    return false;
+  }
+
+  /// Morning adhkar: 30 minutes after Fajr. Evening adhkar: 30 minutes after Asr.
+  /// (so they follow the season and the city by themselves). Today's one is skipped once you finished that list.
+  void _syncAdhkarAlerts() {
+    final m = settings['adhkar_morning_alert'] == true;
+    final e = settings['adhkar_evening_alert'] == true;
+    final today = dateOnly(PrayerConfig.now());
+    final dm = (m || e) && adhkarDoneToday('morning');
+    final de = (m || e) && adhkarDoneToday('evening');
+    final sig = (m || e) ? '${iso(today)}|$lang|${PrayerConfig.sig}|$m$dm|$e$de' : 'off';
+    if (sig == _adhkarSig) return;
+    _adhkarSig = sig;
+    if (!m && !e) {
+      Notify.clearAdhkar();
+      return;
+    }
+    final items = <PrayerAlert>[];
+    for (var i = 0; i < 7; i++) {
+      final date = DateTime(today.year, today.month, today.day + i);
+      final times = prayerTimes(date);
+      if (m && !(i == 0 && dm)) {
+        items.add(PrayerAlert(PrayerConfig.instant(date, times['fajr']! + 0.5),
+            rtl ? 'أذكار الصباح' : 'Morning adhkar',
+            rtl ? 'خد دقيقتين وابدأ يومك بالأذكار' : 'Take two minutes to start your day with adhkar'));
+      }
+      if (e && !(i == 0 && de)) {
+        items.add(PrayerAlert(PrayerConfig.instant(date, times['asr']! + 0.5),
+            rtl ? 'أذكار المساء' : 'Evening adhkar',
+            rtl ? 'خد دقيقتين واختم يومك بالأذكار' : 'Take two minutes to end your day with adhkar'));
+      }
+    }
+    Notify.scheduleAdhkar(items);
   }
 
   // --- report ---

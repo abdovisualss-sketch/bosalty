@@ -15,6 +15,7 @@ import 'notify.dart';
 import 'quran.dart';
 import 'state.dart';
 import 'ui.dart';
+import 'worship_log.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -153,7 +154,7 @@ class _ShellState extends State<Shell> {
   AppState? _s;
   int _seen = 0;
   Timer? _clock;
-  String _alerted = '';
+  String _alerted = '', _alertedAdhkar = '';
 
 @override
   void initState() {
@@ -168,26 +169,73 @@ class _ShellState extends State<Shell> {
     });
   }
 
-  /// Keeps the phone's prayer notifications scheduled and, where the system can't notify us
-  /// (Windows / web), shows the "get up and pray" reminder inside the app at each prayer time.
+  /// Keeps the phone's notifications scheduled and, where the system can't notify us
+  /// (Windows / web), shows the "get up and pray" reminder (and the adhkar reminders) inside the app.
   void _tickPrayer() {
     final s = _s;
     if (s == null || !mounted) return;
     s.syncPrayerAlerts();
-    if (Notify.supported || s.settings['prayer_alerts'] != true) return;
-    final now = DateTime.now();
+    if (Notify.supported) return;
+    // "now" on the clock of the chosen city (flagged UTC, so every DateTime below is built with .utc too)
+    final now = PrayerConfig.now();
     final times = prayerTimes(dateOnly(now));
-    for (final k in prayers) {
-      final mins = (times[k]! * 60).round();
-      final at = DateTime(now.year, now.month, now.day, mins ~/ 60, mins % 60);
-      final late = now.difference(at);
-      final key = '${iso(now)}:$k';
-      if (!late.isNegative && late < const Duration(minutes: 3) && _alerted != key) {
-        _alerted = key;
-        _showPrayerDialog(s, k);
-        break;
+    if (s.settings['prayer_alerts'] == true) {
+      for (final k in prayers) {
+        final mins = (times[k]! * 60).round();
+        final at = DateTime.utc(now.year, now.month, now.day, mins ~/ 60, mins % 60);
+        final late = now.difference(at);
+        final key = '${iso(now)}:$k';
+        if (!late.isNegative && late < const Duration(minutes: 3) && _alerted != key) {
+          _alerted = key;
+          _showPrayerDialog(s, k);
+          return;
+        }
       }
     }
+    // morning adhkar = 30 min after Fajr, evening adhkar = 30 min after Asr (skipped once that list is done today)
+    for (final k in const [
+      ['morning', 'fajr', 'adhkar_morning_alert'],
+      ['evening', 'asr', 'adhkar_evening_alert'],
+    ]) {
+      if (s.settings[k[2]] != true || s.adhkarDoneToday(k[0])) continue;
+      final mins = ((times[k[1]]! + 0.5) * 60).round();
+      final at = DateTime.utc(now.year, now.month, now.day, mins ~/ 60, mins % 60);
+      final late = now.difference(at);
+      final key = '${iso(now)}:${k[0]}';
+      if (!late.isNegative && late < const Duration(minutes: 5) && _alertedAdhkar != key) {
+        _alertedAdhkar = key;
+        _showAdhkarDialog(s, k[0]);
+        return;
+      }
+    }
+  }
+
+  void _showAdhkarDialog(AppState s, String kind) {
+    final p = s.pal;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: p.card,
+        icon: Icon(WorshipLog.adhkarIcon(kind), color: WorshipLog.adhkarColor(kind), size: 34),
+        title: Txt(WorshipLog.adhkarTitle(s, kind), size: 18, bold: true, head: true, color: p.accent, align: TextAlign.center),
+        content: Txt(s.rtl ? 'خد دقيقتين للأذكار.' : 'Take two minutes for your adhkar.', size: 15, align: TextAlign.center),
+        actionsAlignment: MainAxisAlignment.center,
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Txt(s.rtl ? 'لاحقًا' : 'Later', color: p.muted),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: p.accent),
+            onPressed: () {
+              Navigator.pop(ctx);
+              s.setTab(4);
+            },
+            child: Txt(s.rtl ? 'افتح الأذكار' : 'Open adhkar', bold: true, color: Colors.white),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showPrayerDialog(AppState s, String k) {
@@ -335,4 +383,3 @@ class _ShellState extends State<Shell> {
     );
   }
 }
-

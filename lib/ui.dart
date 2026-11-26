@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'backup.dart';
 import 'onboarding.dart';
 import 'profile.dart';
+import 'city_sheet.dart';
 import 'sounds.dart';
 import 'state.dart';
 
@@ -711,7 +712,7 @@ class _PrayerBannerState extends State<PrayerBanner> {
   Widget build(BuildContext context) {
     final s = AppScope.of(context);
     final p = s.pal;
-    final now = DateTime.now();
+    final now = PrayerConfig.now(); // the clock of the chosen city
     final times = prayerTimes(dateOnly(now));
     final nowH = now.hour + now.minute / 60;
     String? found;
@@ -1460,7 +1461,11 @@ class _SettingsSheet extends StatelessWidget {
           // ---- prayers & alerts ----
           _Group(title: _l(s, 'الصلاة والتنبيهات', 'Prayer & alerts'), children: [
             _sw(s, Icons.wb_twilight_rounded, _l(s, 'شريط مواقيت الصلاة', 'Prayer times bar'), 'show_prayers'),
+            _tile(s, Icons.location_city_rounded, _l(s, 'مدينة مواقيت الصلاة', 'Prayer times city'), s.cityLabel,
+                () => showCitySheet(context)),
             _sw(s, Icons.notifications_active_rounded, _l(s, 'تذكير عند كل صلاة', 'Remind me at every prayer'), 'prayer_alerts'),
+            _sw(s, Icons.wb_sunny_rounded, _l(s, 'تذكير بأذكار الصباح', 'Morning adhkar reminder'), 'adhkar_morning_alert'),
+            _sw(s, Icons.nightlight_round, _l(s, 'تذكير بأذكار المساء', 'Evening adhkar reminder'), 'adhkar_evening_alert'),
             _sw(s, Icons.volume_up_rounded, _l(s, 'صوت عند انتهاء الجلسة', 'Sound when the timer ends'), 'sound'),
             _tile(s, Icons.music_note_rounded, _l(s, 'رنّة نهاية الجلسة', 'Session end tone'), _toneLabel(s),
                 () => showTimerSoundSheet(context)),
